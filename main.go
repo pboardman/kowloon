@@ -213,6 +213,13 @@ func serve(p runtimePaths, path string) error {
 	if err != nil {
 		return err
 	}
+	w.eventKey, err = privateKey(p, "events.key")
+	if err != nil {
+		return err
+	}
+	if w.key == w.eventKey {
+		return errors.New("MCP control and event keys must differ")
+	}
 	port := os.Getenv("KOWLOON_PORT")
 	if port == "" {
 		port = "9417"
@@ -270,7 +277,7 @@ func serve(p runtimePaths, path string) error {
 		}
 	}
 	program := tea.NewProgram(newUI(w), tea.WithAltScreen(), tea.WithMouseCellMotion())
-	server := &http.Server{Handler: w.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
+	server := &http.Server{Handler: w.handler(), MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	go server.Serve(ln)
 	defer server.Close()
 	if err = writePrivate(filepath.Join(p.dir, "endpoint"), []byte(w.endpoint)); err != nil {

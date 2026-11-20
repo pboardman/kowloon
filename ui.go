@@ -27,7 +27,7 @@ type ui struct {
 	width, height, cursor, offset, menuIndex int
 	rows                                     []row
 	active, mode, entry, notice, path, id    string
-	reveal                                   bool
+	reveal, eventKey                         bool
 	pressed                                  tea.MouseButton
 }
 
@@ -230,9 +230,15 @@ func (u *ui) activate() {
 		}
 	}
 }
+func (u *ui) selectedKey() string {
+	if u.eventKey {
+		return u.w.eventKey
+	}
+	return u.w.key
+}
 func (u *ui) copyKey() {
 	// -w forwards OSC 52 to the attached client if its terminal allows clipboard writes.
-	_, err := u.w.p.tmInput(u.w.key, "load-buffer", "-w", "-b", "kowloon-key", "-")
+	_, err := u.w.p.tmInput(u.selectedKey(), "load-buffer", "-w", "-b", "kowloon-key", "-")
 	if err != nil {
 		u.report(err)
 		return
@@ -250,6 +256,9 @@ func (u *ui) key(k tea.KeyMsg) {
 	switch u.mode {
 	case "settings":
 		switch key {
+		case "tab":
+			u.eventKey = !u.eventKey
+			u.reveal = false
 		case "r":
 			u.reveal = !u.reveal
 		case "c":
@@ -371,6 +380,9 @@ func (u *ui) mouse(m tea.MouseMsg) {
 			u.reveal = !u.reveal
 		case 4:
 			u.copyKey()
+		case 5:
+			u.eventKey = !u.eventKey
+			u.reveal = false
 		case u.height - 1:
 			u.mode = ""
 			u.reveal = false
@@ -449,7 +461,12 @@ func (u *ui) View() string {
 	switch u.mode {
 	case "settings":
 		put(0, " Settings", title)
-		put(2, " MCP access key", accent)
+		label := " MCP control key"
+		if u.eventKey {
+			label = " MCP events-only key"
+		}
+		put(2, label, accent)
+		put(5, " [Tab] Switch key", title)
 		show := "Reveal key"
 		if u.reveal {
 			show = "Hide key"
@@ -458,7 +475,7 @@ func (u *ui) View() string {
 		put(4, " [c] Copy key", title)
 		y := 6
 		if u.reveal {
-			for _, part := range chunks(u.w.key, max(1, u.width-2)) {
+			for _, part := range chunks(u.selectedKey(), max(1, u.width-2)) {
 				put(y, " "+part, title)
 				y++
 			}

@@ -48,11 +48,13 @@ type workspace struct {
 	manualWidth                          bool
 	terms                                map[string]*tracked
 	cache                                map[string]gitCache
+	eventKey                             string
+	events                               eventLog
 	changed                              chan struct{}
 }
 
 func newWorkspace(p runtimePaths, side string) *workspace {
-	return &workspace{p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
+	return &workspace{events: eventLog{instance: randomID(16), waiters: make(chan struct{}, 32)}, p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
 }
 
 // The workspace lock serializes pane swaps, paste buffers and Git mutations.
@@ -63,6 +65,7 @@ func (w *workspace) status(t *tracked, state, reason string) {
 	}
 	s := Status{state, reason, t.term.Revision + 1}
 	t.term.Status = s
+	w.events.append(queueEvent{Type: "terminal." + state, Subject: t.term.ID, Revision: s.Revision, Reason: reason})
 	t.history = append(t.history, s)
 	if len(t.history) > 64 {
 		t.history = slices.Clone(t.history[len(t.history)-64:])
@@ -72,6 +75,9 @@ func (w *workspace) status(t *tracked, state, reason string) {
 func (w *workspace) event(e statusEvent) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if !slices.Contains(states, e.State) || !slices.Contains([]string{"", "auth", "permission", "question"}, e.Reason) {
+		return
+	}
 	if t := w.terms[e.Pane]; t != nil && t.term.State != "exited" {
 		w.status(t, e.State, e.Reason)
 	}
@@ -288,13 +294,13 @@ func (w *workspace) spawn(path string, codex bool) (Terminal, error) {
 	if codex {
 		s = "starting"
 	}
-	w.status(t, s, "")
 	if _, err = w.p.tm("wait-for", "-S", gate); err != nil {
 		return Terminal{}, err
 	}
 	if err = w.selectLocked(id, true); err != nil {
 		return Terminal{}, err
 	}
+	w.status(t, s, "")
 	failed = false
 	return t.term, nil
 }
@@ -353,6 +359,7 @@ func (w *workspace) closeTerm(id string) error {
 	if _, err := w.p.tm("kill-pane", "-t", id); err != nil {
 		return err
 	}
+	w.status(t, "exited", "")
 	delete(w.terms, id)
 	w.notify()
 	return nil

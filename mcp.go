@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -140,7 +141,30 @@ func (w *workspace) handler() http.Handler {
 		out, err := w.wait(ctx, a)
 		return nil, out, err
 	})
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	events := mcp.NewServer(&mcp.Implementation{Name: "kowloon-events", Version: "0.1.0"}, nil)
+	makeHandler := func(server *mcp.Server) http.Handler {
+		server.AddResourceTemplate(&mcp.ResourceTemplate{Name: "Event queue", URITemplate: "queue://events/{cursor}", MIMEType: "application/json"}, func(ctx context.Context, r *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			cursor := strings.TrimPrefix(r.Params.URI, "queue://events/")
+			if cursor == "head" {
+				cursor = ""
+			}
+			page, err := w.readEvents(ctx, eventArgs{Cursor: cursor})
+			if err != nil {
+				return nil, err
+			}
+			data, err := json.Marshal(page)
+			if err != nil {
+				return nil, err
+			}
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: r.Params.URI, MIMEType: "application/json", Text: string(data)}}}, nil
+		})
+		mcp.AddTool(server, &mcp.Tool{Name: "read_events", Description: "Read a batch of status events. Each reader keeps its own cursor.", Meta: mcp.Meta{"io.github.kowloon/event-queue": "v1"}, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a eventArgs) (*mcp.CallToolResult, eventPage, error) {
+			page, err := w.readEvents(ctx, a)
+			return nil, page, err
+		})
+		return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	}
+	controlHandler, eventHandler := makeHandler(s), makeHandler(events)
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mcp" {
 			http.NotFound(rw, r)
@@ -151,7 +175,15 @@ func (w *workspace) handler() http.Handler {
 			return
 		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(w.key)) != 1 {
+		var handler http.Handler
+		switch {
+		case !ok || token == "":
+		case subtle.ConstantTimeCompare([]byte(token), []byte(w.key)) == 1:
+			handler = controlHandler
+		case subtle.ConstantTimeCompare([]byte(token), []byte(w.eventKey)) == 1:
+			handler = eventHandler
+		}
+		if handler == nil {
 			rw.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(rw, "MCP key required", http.StatusUnauthorized)
 			return

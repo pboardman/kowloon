@@ -88,7 +88,11 @@ func publishPrivate(path string, data []byte, publish func(string, string) error
 func writePrivate(path string, data []byte) error { return publishPrivate(path, data, os.Rename) }
 
 func secret(p runtimePaths) (string, error) {
-	path := filepath.Join(p.config, "mcp.key")
+	return privateKey(p, "mcp.key")
+}
+
+func privateKey(p runtimePaths, name string) (string, error) {
+	path := filepath.Join(p.config, name)
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		// Separate login sessions can share this key. Only the first publisher wins.
 		if err := publishPrivate(path, []byte(randomID(32)), os.Link); err != nil && !errors.Is(err, os.ErrExist) {

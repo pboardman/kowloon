@@ -11,7 +11,7 @@ go build -o kowloon .
 ./kowloon
 ```
 
-Running `kowloon` starts an empty workspace or reattaches to the running workspace. To open a specific directory, pass its path to the executable. Kowloon starts your shell there. The sidebar updates the repository and branch when you use `cd` or switch branches. To install the command in your Go binary directory, run `go install .`.
+Running `kowloon` reattaches to the running workspace. If the workspace stopped, Kowloon restores the last saved session. The first start opens an empty workspace. To open a specific directory, pass its path to the executable. Kowloon starts your shell there. The sidebar updates the repository and branch when you use `cd` or switch branches. To install the command in your Go binary directory, run `go install .`.
 
 | Action | Control |
 | --- | --- |
@@ -24,11 +24,25 @@ Running `kowloon` starts an empty workspace or reattaches to the running workspa
 | Toggle agent mode | Press Ctrl+B, then `a` to focus the sidebar and toggle the flat agent list. In the sidebar, press `a` directly. |
 | Return to the terminal | Press Ctrl+B, then Right. |
 | Detach | Press Ctrl+B, then `d`. Run Kowloon again to reattach. |
+| Upgrade the running server | After installing the new binary, run `kowloon --restart`. |
+| Skip recovery | When the workspace is stopped, run `kowloon --no-restore` to start fresh. |
 | Stop the workspace | Run `kowloon --stop`. This terminates all terminals in the workspace. |
 
 Kowloon creates worktrees under `$XDG_DATA_HOME/kowloon/worktrees`. The default base directory is `~/.local/share`. For a new branch, Git starts from the selected checkout. For an existing local branch, Git uses that branch if another worktree does not have it checked out.
 
 Agent mode shows one row per open Codex session, in terminal creation order. Each row shows the current status, checkout, and available task title. An idle agent or a finished turn stays visible until Codex exits. Use the arrow keys and Enter to open a listed terminal.
+
+## Session recovery
+
+For an upgrade, install the new binary and run `kowloon --restart`. This replaces the sidebar and MCP server. Tmux keeps the same terminal processes, pane IDs, scrollback, and running agents. If only the Kowloon server crashes, run `kowloon` to reconnect to those panes.
+
+After a reboot or a tmux shutdown, run `kowloon` to reopen the saved workspace. Kowloon restores terminal directories, worktrees, the selected terminal, agent mode, and sidebar width. Shells start fresh in their saved directories. Commands interrupted by the shutdown need to be started again.
+
+For a managed Codex terminal, answer the folder and hook questions to resume its saved conversation. For Codex started by hand, choose the conversation from the Codex resume picker. Kowloon keeps run receipts and reports an unconfirmed turn as `unavailable`. Cold recovery can assign new terminal IDs. MCP clients can use `list_workspace` to get the current IDs.
+
+Use `kowloon --no-restore` to start empty after shutdown, or `kowloon --no-restore /path/to/repo` to open just that directory. The fresh workspace replaces the saved session. When tmux is still running, Kowloon reattaches to the live workspace.
+
+Kowloon saves changes automatically in `session.json` beside the MCP key. Only your account can read the file. The file contains workspace metadata and run receipts. Terminal contents, prompts, and approval choices stay outside the file. If a saved directory is unavailable, Kowloon tries it again at the next cold start.
 
 ## Codex status
 
@@ -37,7 +51,7 @@ Kowloon reads status events directly from each terminal, including terminals in 
 | Sidebar | MCP state | Meaning |
 | --- | --- | --- |
 | STARTING / UNKNOWN | `starting` / `unknown` | Kowloon launched or detected Codex and awaits its first status event. |
-| IDLE | `idle` | Codex is ready for a prompt. |
+| IDLE | `idle` | The terminal reports idle. Use `get_agent_status` for prompt readiness. |
 | WORKING | `working` | Codex is processing a turn. |
 | QUESTION | `waiting` | Codex needs an answer. The reason is `question`. |
 | APPROVAL / SIGN IN | `blocked` | Codex needs permission or authentication. The reason is `permission` or `auth`. |
@@ -70,24 +84,45 @@ Start the MCP client in an environment that contains `KOWLOON_MCP_KEY`. For anot
 
 | Tool | Action |
 | --- | --- |
+| `save_session` | Save the current Kowloon workspace immediately. |
 | `list_workspace` | Get checkout paths, branches, terminal IDs, titles, states, and the active terminal. |
 | `open_repo` / `new_terminal` | Open a shell at a checkout root or in a directory. |
 | `create_worktree` | Create a named checkout and open a shell there. |
-| `launch_codex` | Open an interactive Codex terminal in a directory. |
+| `create_or_open_workspace` | Create a directory or reuse a terminal there. Set `init_git` to initialize Git and `launch_codex` to open Codex. |
+| `launch_codex` | Open a new interactive Codex terminal with run tracking. |
+| `get_agent_status` | Read `can_submit` and the current setup decision for a terminal. |
+| `answer_setup` | Choose how Codex handles folder trust or hooks for this session. |
+| `submit_prompt` | Submit a prompt and receive the run ID that Codex accepted. |
+| `get_run` / `wait_for_run` | Read or wait for the status of one run by ID. |
 | `select_terminal` / `close_terminal` | Focus a terminal or terminate it. |
 | `set_agent_mode` | Set `enabled` to show the flat agent list or clear it to restore the repository tree. `list_workspace` reports `agent_mode`. |
 | `set_agent_bell` | Set `enabled` to turn the agent bell on or off. `list_workspace` reports `agent_bell`. |
 | `resize_sidebar` | Set the width in columns. |
 | `read_terminal` | Read the screen and optional scrollback. |
 | `send_input` | Send literal text, a key, or both to a terminal. |
-| `wait_for_state` | Wait for any requested state, with a timeout of up to 120 seconds. |
+| `wait_for_state` | Wait for terminal activity for up to 120 seconds. |
 
-To follow one turn, save the terminal ID and its current `revision` from `list_workspace`. Call `send_input` with that ID, the prompt in `text`, and `"key": "Enter"`. Call `wait_for_state` with the saved revision as `after_revision` and the states `waiting`, `blocked`, `done`, `error`, and `exited`. Each terminal retains its last 64 transitions. If Codex asks a question, use `read_terminal` to see the choices. Use `send_input` to enter the answer. Resume waiting from the revision that the previous wait returned.
+### Submit a prompt from Linden
+
+1. Call `create_or_open_workspace` with an absolute `path` and `launch_codex: true`. For a new Git repository, also pass `init_git: true`.
+2. Call `get_agent_status` with the terminal `id`. If it returns a blocker, pass its `kind` and a listed `choice` to `answer_setup`.
+3. For folder trust, choose `open_untrusted`, `trust_folder`, or `cancel`. The trust choice applies to this Codex session.
+4. For hook review, choose `continue_without_hooks` to disable hooks. Choose `use_previously_trusted_hooks` to use the normal Codex hook policy.
+5. When `can_submit` is true, call `submit_prompt` with `id` and `prompt`. Save the returned `run_id`.
+6. Call `wait_for_run` with that `run_id`. On timeout, the response includes the current run status and `matched: false`.
+
+For retries, include a unique `request_id` and reuse it with the same terminal and prompt. Kowloon returns the saved receipt while it retains that run.
+
+Codex supplies the run ID. An accepted run can report `running`, `waiting_for_approval`, or `waiting_for_input`. Use `read_terminal` and `send_input` for runtime questions and approvals. Call `wait_for_run` with `states: ["finished", "failed", "interrupted"]` to wait for an outcome.
+
+Only the matching Codex turn can report `finished`, `failed`, or `interrupted`. If Kowloon loses contact, it reports `unavailable`. Kowloon retains active runs and the last 512 closed run records across workspace restarts.
+
+Run tracking uses the Codex app server and its interactive terminal. It was tested with Codex CLI 0.171.0. For Codex started by hand in a shell, use the terminal tools. [Codex app server](https://developers.openai.com/codex/app-server/)
 
 ## Receive agent events
 
-Kowloon keeps the last 512 terminal state changes in memory. Each client keeps a cursor, a bookmark for its last read.
-The events-only key grants access to this feed. Events contain a terminal ID, event type, revision, and optional reason.
+Kowloon keeps the last 512 terminal and run state changes in memory. Each client keeps a cursor, a bookmark for its last read.
+The events-only key grants access to this feed. Events contain a subject ID, event type, revision, and optional reason.
 Terminal text, repository paths, and credentials stay outside the feed. Use HTTPS or an encrypted tunnel across untrusted networks.
 
 Call `read_events` with `{}` to get the current cursor.
@@ -95,6 +130,7 @@ Pass that value as `cursor` on the next call. Set `wait_seconds` to a value from
 A call returns at most 64 events. Save `next_cursor` after processing the batch.
 If Kowloon restarts or the cursor falls behind, the response contains `reset: true` and a new cursor.
 Clients with control access can call `list_workspace` for current state after a reset.
+Each run transition uses the type `run.<status>` and the run ID as its subject.
 Each terminal transition uses the type `terminal.<state>`. For example, a Codex question produces `terminal.waiting` with reason `question`.
 
 ### Register a conversation in Linden
@@ -104,7 +140,7 @@ In the destination conversation, ask Linden to watch the queue. For example:
 
 > Watch the Kowloon read_events queue for terminal.waiting and terminal.blocked. When an agent needs me, tell me which terminal to open.
 
-Linden calls `register_event_queue` through its approval system. The optional `subject` filter limits the subscription to one terminal ID.
+Linden calls `register_event_queue` through its approval system. The optional `subject` filter limits the subscription to one terminal or run ID.
 A matching batch wakes the model in that conversation. A busy conversation receives the batch after the current run finishes.
 Ask Linden to stop watching to remove the registration.
 

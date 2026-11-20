@@ -45,42 +45,61 @@ func pulse() tea.Cmd {
 	return tea.Tick(600*time.Millisecond, func(t time.Time) tea.Msg { return tick(t) })
 }
 func (u *ui) Init() tea.Cmd { return pulse() }
-func badge(t Terminal) (string, string) {
+func badge(t Terminal) (icon, status, color string) {
+	if t.ActiveRun != nil && t.State != "exited" {
+		switch t.ActiveRun.Status {
+		case "waiting_for_approval":
+			return "!", "APPROVAL", amber
+		case "waiting_for_input":
+			return "?", "QUESTION", amber
+		case "unavailable":
+			return "◌", "UNKNOWN", muted
+		case "accepted", "running":
+			// The TUI can see a prompt before the next app-server update.
+			if t.State != "blocked" && t.State != "waiting" {
+				return "●", "WORKING", blue
+			}
+		}
+	}
 	switch t.State {
 	case "working":
-		return "● WORKING", blue
+		return "●", "WORKING", blue
 	case "waiting":
-		return "? QUESTION", amber
+		return "?", "QUESTION", amber
 	case "blocked":
 		if t.Reason == "auth" {
-			return "! SIGN IN", red
+			return "!", "SIGN IN", red
 		}
 		if t.Reason == "permission" {
-			return "! APPROVAL", amber
+			return "!", "APPROVAL", amber
 		}
-		return "! BLOCKED", red
+		return "!", "BLOCKED", red
 	case "done":
-		return "✓ DONE", accent
+		return "✓", "DONE", accent
 	case "error":
-		return "! ERROR", red
+		return "!", "ERROR", red
 	case "idle":
-		return "○ IDLE", muted
+		return "○", "IDLE", muted
 	case "starting":
-		return "◌ STARTING", blue
+		return "◌", "STARTING", blue
 	case "unknown":
-		return "◌ UNKNOWN", muted
+		return "◌", "UNKNOWN", muted
 	}
-	return "", muted
+	return " ", "", muted
 }
-func terminalRow(t Terminal, active, indent, agentLabel string) row {
+func terminalRow(t Terminal, active, indent, project string) row {
 	marker := " "
 	if t.ID == active {
 		marker = "›"
 	}
-	status, color := badge(t)
-	label := t.Program
+	icon, status, color := badge(t)
+	label := icon + " " + t.Program
 	if status != "" {
-		label = status + "  " + agentLabel
+		if project == "" {
+			label = icon + " Codex  " + status
+		} else {
+			label = icon + " " + status + "  " + project
+		}
 		dir := filepath.Base(t.Checkout.Path)
 		if task := strings.TrimSuffix(t.Title, " | "+dir); task != "" && task != dir {
 			label += " · " + task
@@ -153,7 +172,7 @@ func repositoryRows(s Snapshot) []row {
 			if t.State == "exited" || t.Checkout.Path != c.Path {
 				continue
 			}
-			rows = append(rows, terminalRow(t, s.Active, indent, "Codex"))
+			rows = append(rows, terminalRow(t, s.Active, indent, ""))
 		}
 	}
 	return rows

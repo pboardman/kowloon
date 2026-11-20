@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -164,6 +163,27 @@ func TestMCPAuth(t *testing.T) {
 	}
 }
 
+func TestRepositoryTerminalAlignment(t *testing.T) {
+	repo := Checkout{Repo: "/src/kowloon", Path: "/src/kowloon"}
+	tree := Checkout{Repo: repo.Path, Path: "/trees/topic", Branch: "topic"}
+	s := Snapshot{Active: "%2", Checkouts: []Checkout{repo, tree}, Terminals: []Terminal{
+		{ID: "%1", Checkout: repo, Program: "bash", Status: Status{State: "shell"}},
+		{ID: "%2", Checkout: repo, Program: "codex", Status: Status{State: "working"}, Title: "Review tests | kowloon"},
+		{ID: "%3", Checkout: tree, Program: "fish", Status: Status{State: "shell"}},
+		{ID: "%4", Checkout: tree, Program: "codex", Status: Status{State: "blocked", Reason: "permission"}},
+	}}
+	var labels []string
+	for _, r := range repositoryRows(s) {
+		if r.id != "" {
+			labels = append(labels, r.label)
+		}
+	}
+	want := []string{"     bash", "›  ● Codex  WORKING · Review tests", "       fish", "     ! Codex  APPROVAL"}
+	if !slices.Equal(labels, want) {
+		t.Fatalf("rendered terminal rows:\n%s", strings.Join(labels, "\n"))
+	}
+}
+
 func TestAgentModeRows(t *testing.T) {
 	w := newWorkspace(runtimePaths{}, "%0")
 	repo := Checkout{Repo: "/src/kowloon", Path: "/src/kowloon", Branch: "main"}
@@ -183,8 +203,8 @@ func TestAgentModeRows(t *testing.T) {
 	}
 	for i, r := range u.rows {
 		term := w.terms[r.id].term
-		status, _ := badge(term)
-		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(r.label, status) {
+		icon, status, _ := badge(term)
+		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(r.label, icon+" "+status) {
 			t.Fatalf("agent row: %+v", r)
 		}
 		if term.Checkout.Path == repo.Path && !strings.Contains(r.label, r.id+" kowloon/main") {
@@ -211,7 +231,7 @@ func TestLiveWorkspace(t *testing.T) {
 		t.Skip("set KOWLOON_INTEGRATION=1 for a real tmux server")
 	}
 	// Use a short socket path. Everything, including the tmux session, belongs to this test.
-	base, err := os.MkdirTemp("", "kw-live-")
+	base, err := os.MkdirTemp("", "kw.live-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,24 +239,13 @@ func TestLiveWorkspace(t *testing.T) {
 	for k, v := range map[string]string{"XDG_RUNTIME_DIR": base, "XDG_CONFIG_HOME": base + "/config", "XDG_DATA_HOME": base + "/data", "KOWLOON_PORT": "0", "HOME": base, "SHELL": "/bin/sh", "TERM": "xterm-256color", "CODEX_HOME": base + "/codex", "TMUX": "", "TMUX_PANE": ""} {
 		t.Setenv(k, v)
 	}
+	var releaseModel func()
 	if os.Getenv("KOWLOON_TEST_CODEX") == "1" {
 		if err := os.Mkdir(filepath.Join(base, "codex"), 0700); err != nil {
 			t.Fatal(err)
 		}
-		// A real CLI in an isolated test home must not leave a shared daemon behind.
-		codex, err := exec.LookPath("codex")
-		if err != nil {
-			t.Fatal(err)
-		}
-		bin := filepath.Join(base, "bin")
-		if err = os.Mkdir(bin, 0700); err != nil {
-			t.Fatal(err)
-		}
-		wrapper := "#!/bin/sh\nexec " + quote(codex) + " --no-daemon \"$@\"\n"
-		if err = os.WriteFile(filepath.Join(bin, "codex"), []byte(wrapper), 0700); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		releaseModel = startTestModel(t, base)
+
 	}
 	p, err := paths()
 	if err != nil {
@@ -256,16 +265,16 @@ func TestLiveWorkspace(t *testing.T) {
 	if err = dispatch([]string{"--detach"}); err != nil {
 		t.Fatal(err)
 	}
-	endpoint, err := os.ReadFile(filepath.Join(p.dir, "endpoint"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	k, err := secret(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tool := func(name string, args any, out any) {
 		t.Helper()
+		endpoint, err := os.ReadFile(filepath.Join(p.dir, "endpoint"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		msg, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
 		req, err := http.NewRequest("POST", string(endpoint), strings.NewReader(string(msg)))
 		if err != nil {
@@ -288,6 +297,10 @@ func TestLiveWorkspace(t *testing.T) {
 			Error json.RawMessage
 		}
 		if err = json.NewDecoder(resp.Body).Decode(&reply); err != nil || reply.Error != nil || reply.Result.IsError {
+			if id, ok := args.(termArgs); ok {
+				view, _ := p.tm("capture-pane", "-p", "-t", id.ID, "-S", "-100")
+				t.Log(view)
+			}
 			t.Fatalf("%s HTTP %d: %v %s %s", name, resp.StatusCode, err, reply.Error, reply.Result.Content)
 		}
 		if out != nil {
@@ -301,6 +314,24 @@ func TestLiveWorkspace(t *testing.T) {
 	if s.Active != "" || len(s.Terminals) != 0 || len(s.Checkouts) != 0 {
 		t.Fatalf("pathless startup from a Git repository opened a terminal: %+v", s)
 	}
+	// Directory creation, Git initialization and reuse through the public HTTP tools.
+	plain := filepath.Join(base, "new", "plain.workspace")
+	var opened, reopened Terminal
+	tool("create_or_open_workspace", createWorkspaceArgs{Path: plain}, &opened)
+	if _, err := os.Stat(filepath.Join(plain, ".git")); !os.IsNotExist(err) {
+		t.Fatal("unexpected Git initialization", err)
+	}
+	tool("create_or_open_workspace", createWorkspaceArgs{Path: plain, InitGit: true}, &reopened)
+	if reopened.ID != opened.ID || reopened.Checkout.Branch == "" {
+		t.Fatal(opened, reopened)
+	}
+	sub := filepath.Join(plain, "subdir")
+	tool("create_or_open_workspace", createWorkspaceArgs{Path: sub, InitGit: true}, &reopened)
+	if reopened.Checkout.Path != plain {
+		t.Fatal("initialized nested repository", reopened)
+	}
+	tool("close_terminal", termArgs{reopened.ID}, nil)
+	tool("close_terminal", termArgs{opened.ID}, nil)
 	if err = dispatch([]string{"--detach", "."}); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +384,7 @@ func TestLiveWorkspace(t *testing.T) {
 	if s.Active != first || len(s.Terminals) != 2 {
 		t.Fatalf("pathless reattach changed the workspace: %+v", s)
 	}
-	if err = start(p, repo); err != nil {
+	if err = start(p, repo, false, false); err != nil {
 		t.Fatal(err)
 	}
 	tool("list_workspace", noArgs{}, &s)
@@ -403,6 +434,7 @@ func TestLiveWorkspace(t *testing.T) {
 			view, _ := p.tm("capture-pane", "-p", "-t", side)
 			return strings.Contains(view, " AGENTS") && strings.Contains(view, "a repository/main") && !strings.Contains(view, "▾")
 		})
+		testManagedRun(t, tool, agent, releaseModel)
 		tool("close_terminal", termArgs{agent.ID}, nil)
 		eventually(func() bool {
 			view, _ := p.tm("capture-pane", "-p", "-t", side)
@@ -484,4 +516,5 @@ func TestLiveWorkspace(t *testing.T) {
 		t.Fatal(s)
 	}
 
+	testSessionRecovery(t, p, repo, tool)
 }

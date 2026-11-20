@@ -120,32 +120,37 @@ func (w *workspace) wait(ctx context.Context, a waitArgs) (waitResult, error) {
 	}
 }
 
-func register[I, O any](s *mcp.Server, name, desc string, fn func(I) (O, error)) {
-	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc}, func(_ context.Context, _ *mcp.CallToolRequest, in I) (*mcp.CallToolResult, O, error) {
-		out, err := fn(in)
+func registerCtx[I, O any](s *mcp.Server, name, desc string, fn func(context.Context, I) (O, error)) {
+	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc}, func(ctx context.Context, _ *mcp.CallToolRequest, in I) (*mcp.CallToolResult, O, error) {
+		out, err := fn(ctx, in)
 		return nil, out, err
 	})
+}
+func register[I, O any](s *mcp.Server, name, desc string, fn func(I) (O, error)) {
+	registerCtx(s, name, desc, func(_ context.Context, in I) (O, error) { return fn(in) })
 }
 func done(err error) (ack, error) { return ack{err == nil}, err }
 
 func (w *workspace) handler() http.Handler {
 	s := mcp.NewServer(&mcp.Implementation{Name: "kowloon", Version: "0.1.0"}, nil)
-	register(s, "list_workspace", "List repositories, worktrees, terminals, branches, sidebar width and live agent states.", func(noArgs) (Snapshot, error) { return w.snapshot(), nil })
-	register(s, "open_repo", "Open a shell at the root of a Git checkout.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, false, true) })
-	register(s, "new_terminal", "Open a shell in a directory.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, false, false) })
+	w.registerAgentTools(s)
+	register(s, "save_session", "Save the current Kowloon workspace for the next start.", func(noArgs) (ack, error) { return done(w.refresh()) })
+	register(s, "list_workspace", "List Kowloon repositories, worktrees, terminals, branches, sidebar width and live agent states.", func(noArgs) (Snapshot, error) { return w.snapshot(), nil })
+	register(s, "open_repo", "Open a Kowloon shell at the root of a Git checkout.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, false, true) })
+	register(s, "new_terminal", "Open a Kowloon shell in a directory.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, false, false) })
 	register(s, "create_worktree", "Create a named Git worktree and open its terminal. Reuse a matching Kowloon worktree.", func(a treeArgs) (Terminal, error) { return w.addTree(a.Path, a.Branch) })
-	register(s, "launch_codex", "Launch the interactive Codex CLI in a new terminal.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, true, false) })
-	register(s, "select_terminal", "Show a terminal on the right and focus it.", func(a termArgs) (ack, error) { return done(w.selectTerm(a.ID)) })
-	register(s, "close_terminal", "Stop the selected terminal and its running program.", func(a termArgs) (ack, error) { return done(w.closeTerm(a.ID)) })
-	register(s, "read_terminal", "Read the visible terminal, including questions and answer choices. Optionally include scrollback.", func(a readArgs) (screen, error) { out, err := w.read(a.ID, a.Lines); return screen{out}, err })
-	register(s, "send_input", "Send literal text and/or one named key to a terminal. Supported keys: "+strings.Join(keys, ", ")+".", func(a inputArgs) (ack, error) { return done(w.input(a.ID, a.Text, a.Key)) })
-	register(s, "set_agent_mode", "Show a flat list of agent terminals when enabled. Disable to show repositories.", func(a enabledArgs) (ack, error) {
+	register(s, "launch_codex", "Launch interactive Codex in Kowloon. Use get_agent_status for setup decisions and prompt readiness.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, true, false) })
+	register(s, "select_terminal", "Focus a terminal in the right pane of Kowloon.", func(a termArgs) (ack, error) { return done(w.selectTerm(a.ID)) })
+	register(s, "close_terminal", "Stop the selected Kowloon terminal and its running program.", func(a termArgs) (ack, error) { return done(w.closeTerm(a.ID)) })
+	register(s, "read_terminal", "Read the visible Kowloon terminal, including questions and answer choices. Optionally include scrollback.", func(a readArgs) (screen, error) { out, err := w.read(a.ID, a.Lines); return screen{out}, err })
+	register(s, "send_input", "Send literal text, one named key, or both to a Kowloon terminal. Supported keys: "+strings.Join(keys, ", ")+".", func(a inputArgs) (ack, error) { return done(w.input(a.ID, a.Text, a.Key)) })
+	register(s, "set_agent_mode", "Show Kowloon agent terminals in a flat list when enabled. Disable to show repositories.", func(a enabledArgs) (ack, error) {
 		w.setAgentMode(a.Enabled)
 		return ack{OK: true}, nil
 	})
-	register(s, "set_agent_bell", "Enable or mute the agent attention bell and save the preference.", func(a enabledArgs) (ack, error) { return done(w.setAgentBell(a.Enabled)) })
-	register(s, "resize_sidebar", "Set the sidebar width in terminal columns.", func(a widthArgs) (ack, error) { return done(w.resize(a.Columns)) })
-	mcp.AddTool(s, &mcp.Tool{Name: "wait_for_state", Description: "Wait for a terminal state: " + strings.Join(states, ", ") + ". Each terminal retains its last 64 transitions."}, func(ctx context.Context, _ *mcp.CallToolRequest, a waitArgs) (*mcp.CallToolResult, waitResult, error) {
+	register(s, "set_agent_bell", "Enable or mute the Kowloon agent bell and save the preference.", func(a enabledArgs) (ack, error) { return done(w.setAgentBell(a.Enabled)) })
+	register(s, "resize_sidebar", "Set the width of the Kowloon sidebar in terminal columns.", func(a widthArgs) (ack, error) { return done(w.resize(a.Columns)) })
+	mcp.AddTool(s, &mcp.Tool{Name: "wait_for_state", Description: "Wait for Kowloon terminal activity. For a submitted prompt, use wait_for_run. Terminal states: " + strings.Join(states, ", ") + ". Each terminal retains its last 64 transitions."}, func(ctx context.Context, _ *mcp.CallToolRequest, a waitArgs) (*mcp.CallToolResult, waitResult, error) {
 		out, err := w.wait(ctx, a)
 		return nil, out, err
 	})
@@ -166,7 +171,7 @@ func (w *workspace) handler() http.Handler {
 			}
 			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: r.Params.URI, MIMEType: "application/json", Text: string(data)}}}, nil
 		})
-		mcp.AddTool(server, &mcp.Tool{Name: "read_events", Description: "Read a batch of status events. Each reader keeps its own cursor.", Meta: mcp.Meta{"io.github.kowloon/event-queue": "v1"}, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a eventArgs) (*mcp.CallToolResult, eventPage, error) {
+		mcp.AddTool(server, &mcp.Tool{Name: "read_events", Description: "Read a batch of Kowloon status events. Each reader keeps its own cursor.", Meta: mcp.Meta{"io.github.kowloon/event-queue": "v1"}, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a eventArgs) (*mcp.CallToolResult, eventPage, error) {
 			page, err := w.readEvents(ctx, a)
 			return nil, page, err
 		})

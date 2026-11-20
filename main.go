@@ -17,7 +17,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -32,9 +31,11 @@ func main() {
 func dispatch(args []string) error {
 	fs := flag.NewFlagSet("kowloon", flag.ContinueOnError)
 	detach := fs.Bool("detach", false, "start without attaching a terminal")
+	restart := fs.Bool("restart", false, "reload the Kowloon server and keep live terminal processes")
+	fresh := fs.Bool("no-restore", false, "skip the saved workspace when starting a new tmux session")
 	stop := fs.Bool("stop", false, "end the workspace and terminate all its running terminals")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: kowloon [--detach] [directory] | kowloon --stop\n\nStart an empty workspace or reattach to an existing one. Supply a directory to open a shell there.\nDrag the divider to resize. Press Ctrl+b, then d to detach.")
+		fmt.Fprintln(fs.Output(), "Usage: kowloon [--detach] [--no-restore] [directory] | kowloon --restart | kowloon --stop\n\nRestore the saved workspace or reattach to an existing one. Supply a directory to open a shell there.\nDrag the divider to resize. Press Ctrl+b, then d to detach.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -49,10 +50,16 @@ func dispatch(args []string) error {
 	}
 	a := fs.Args()
 	if *stop {
-		if *detach || len(a) != 0 {
+		if *detach || *restart || *fresh || len(a) != 0 {
 			return errors.New("use --stop alone to end all workspace terminals")
 		}
-		_, err := p.tm("kill-session", "-t", "=kowloon")
+		lock, err := lockWorkspace(p)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		flushRunningSession(p)
+		_, err = p.tm("kill-session", "-t", "=kowloon")
 		return err
 	}
 	if len(a) > 0 {
@@ -61,16 +68,27 @@ func dispatch(args []string) error {
 			if len(a) == 2 {
 				return watch(p, "%"+a[1], os.Stdin)
 			}
+		case "_codex":
+			if len(a) == 4 || len(a) == 5 {
+				thread := ""
+				if len(a) == 5 {
+					thread = a[4]
+				}
+				return runCodexPane(a[1], a[2], a[3], thread)
+			}
 		case "_run":
-			if len(a) == 3 {
+			if len(a) >= 3 {
 				if _, err := p.tm("wait-for", a[1]); err != nil {
 					return err
 				}
-				return syscall.Exec(a[2], []string{a[2]}, os.Environ())
+				return syscall.Exec(a[2], a[2:], os.Environ())
 			}
 		case "_sidebar":
+			if len(a) == 3 {
+				return serve(p, a[1], a[2])
+			}
 			if len(a) == 2 {
-				return serve(p, a[1])
+				return serve(p, a[1], "restore")
 			}
 		case "_empty":
 			fmt.Println("Choose + New in the sidebar to open a terminal.")
@@ -89,13 +107,13 @@ func dispatch(args []string) error {
 			return err
 		}
 	}
-	if !*detach && !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !*restart && !*detach && !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("run kowloon in a terminal or use --detach")
 	}
-	if err := start(p, path); err != nil {
+	if err := start(p, path, *restart, *fresh); err != nil {
 		return err
 	}
-	if *detach {
+	if *detach || *restart {
 		fmt.Println("Kowloon is running. Use kowloon to attach.")
 		return nil
 	}
@@ -107,20 +125,57 @@ func dispatch(args []string) error {
 	return syscall.Exec(exe, append([]string{"tmux"}, p.tmArgs("attach-session", "-t", "kowloon")...), os.Environ())
 }
 
-func start(p runtimePaths, path string) error {
+func lockWorkspace(p runtimePaths) (*os.File, error) {
 	lock, err := os.OpenFile(filepath.Join(p.dir, "start.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return lock, nil
+}
+
+func start(p runtimePaths, path string, restart, fresh bool) error {
+	lock, err := lockWorkspace(p)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
-		return err
-	}
 	if err := writePrivate(filepath.Join(p.dir, "tmux.conf"), tmuxConfig); err != nil {
 		return err
 	}
 	_, existing := p.tm("has-session", "-t", "=kowloon")
-	if existing != nil {
+	mode := "restore"
+	if fresh {
+		mode = "fresh"
+	}
+	if existing == nil {
+		dead, err := p.tm("display-message", "-p", "-t", "kowloon:workspace.0", "#{pane_dead}")
+		if err != nil {
+			return err
+		}
+		if dead == "1" || restart {
+			cmd, err := p.tm("display-message", "-p", "-t", "kowloon:workspace.0", "#{pane_start_command}")
+			if err != nil {
+				return err
+			}
+			if !strings.Contains(cmd, " _sidebar ") {
+				return errors.New("could not identify the Kowloon sidebar to restart")
+			}
+			if dead != "1" {
+				flushRunningSession(p)
+			}
+
+			if _, err = p.tm("set-option", "-t", "kowloon", "@ready", "0"); err != nil {
+				return err
+			}
+			if _, err = p.tm("respawn-pane", "-k", "-t", "kowloon:workspace.0", "-c", p.dir, p.exe, "_sidebar", "", "live"); err != nil {
+				return err
+			}
+		}
+	} else {
 		width, height, err := term.GetSize(int(os.Stdout.Fd()))
 		if err != nil || width < 20 || height < 5 {
 			width, height = 120, 40
@@ -129,20 +184,20 @@ func start(p runtimePaths, path string) error {
 		if path != "" {
 			args = append(args, "-c", path)
 		}
-		_, err = p.tm(append(args, p.exe, "_sidebar", path)...)
+		_, err = p.tm(append(args, p.exe, "_sidebar", path, mode)...)
 		if err != nil {
 			return err
 		}
 	}
-	for range 100 {
+	for range 600 {
 		v, err := p.tm("show-options", "-qv", "-t", "kowloon", "@ready")
 		if err == nil && v == "1" {
 			dead, _ := p.tm("display-message", "-p", "-t", "kowloon:workspace.0", "#{pane_dead}")
 			if dead == "1" {
-				return errors.New("the sidebar exited; use kowloon --stop to end this workspace before restarting")
+				return errors.New("the Kowloon sidebar exited during startup")
 			}
 			if existing == nil && path != "" {
-				return openOnRunning(p, path)
+				return callRunning(p, "new_terminal", pathArgs{path})
 			}
 			return nil
 		}
@@ -170,8 +225,17 @@ func (token bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 	return http.DefaultTransport.RoundTrip(copy)
 }
 
-// Open additional directories through the same MCP interface as other clients.
-func openOnRunning(p runtimePaths, cwd string) error {
+// Older controllers do not offer save_session. Their panes can still be adopted.
+func flushRunningSession(p runtimePaths) {
+	instance, _ := p.tm("show-options", "-qv", "-t", "kowloon", "@kowloon_instance")
+	if instance != "" {
+		if err := callRunning(p, "save_session", noArgs{}); err != nil {
+			fmt.Fprintln(os.Stderr, "Kowloon could not update its last saved session:", err)
+		}
+	}
+}
+
+func callRunning(p runtimePaths, name string, args any) error {
 	addr, err := os.ReadFile(filepath.Join(p.dir, "endpoint"))
 	if err != nil {
 		return err
@@ -190,7 +254,7 @@ func openOnRunning(p runtimePaths, cwd string) error {
 		return err
 	}
 	defer session.Close()
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "new_terminal", Arguments: pathArgs{cwd}})
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		return err
 	}
@@ -200,12 +264,12 @@ func openOnRunning(p runtimePaths, cwd string) error {
 				return errors.New(msg.Text)
 			}
 		}
-		return errors.New("opening terminal failed")
+		return fmt.Errorf("%s failed", name)
 	}
 	return nil
 }
 
-func serve(p runtimePaths, path string) error {
+func serve(p runtimePaths, path, mode string) error {
 	side := os.Getenv("TMUX_PANE")
 	w := newWorkspace(p, side)
 	var err error
@@ -232,7 +296,14 @@ func serve(p runtimePaths, path string) error {
 	if err != nil || n < 0 || n > 65535 {
 		return errors.New("invalid KOWLOON_PORT")
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort("", port))
+	addr := net.JoinHostPort("", port)
+	ln, err := net.Listen("tcp", addr)
+	if mode == "live" {
+		for attempt := 0; attempt < 20 && errors.Is(err, syscall.EADDRINUSE); attempt++ {
+			time.Sleep(50 * time.Millisecond)
+			ln, err = net.Listen("tcp", addr)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -246,6 +317,10 @@ func serve(p runtimePaths, path string) error {
 		return err
 	}
 	defer events.Close()
+
+	if err = w.recoverSession(path, mode); err != nil {
+		return err
+	}
 	go func() {
 		var buf [2048]byte
 		for {
@@ -263,28 +338,11 @@ func serve(p runtimePaths, path string) error {
 			}
 		}
 	}()
-	width, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return err
+	model := newUI(w)
+	if len(w.pending) > 0 {
+		model.notice = fmt.Sprintf("Restore skipped %d unavailable terminals", len(w.pending))
 	}
-	// Size the initial sidebar for the repository and branch while keeping the terminal larger.
-	desired := 28
-	if path != "" {
-		c := w.resolve(path)
-		desired = max(desired, ansi.StringWidth(filepath.Base(c.Repo))+ansi.StringWidth(c.Branch)+7)
-	}
-	target := min(desired, max(12, width*2/5))
-	w.width = target
-	w.home, err = p.tm("split-window", "-d", "-h", "-l", strconv.Itoa(max(1, width-target-1)), "-P", "-F", "#{pane_id}", "-t", side, p.exe, "_empty")
-	if err != nil {
-		return err
-	}
-	if path != "" {
-		if _, err = w.open(path, false, false); err != nil {
-			return err
-		}
-	}
-	program := tea.NewProgram(newUI(w), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	server := &http.Server{Handler: w.handler(), MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	go server.Serve(ln)
 	defer server.Close()

@@ -15,11 +15,12 @@ import (
 )
 
 type Terminal struct {
-	ID       string   `json:"id"`
-	CWD      string   `json:"cwd"`
-	Checkout Checkout `json:"checkout"`
-	Program  string   `json:"program"`
-	Title    string   `json:"title,omitempty"`
+	ID        string   `json:"id"`
+	CWD       string   `json:"cwd"`
+	Checkout  Checkout `json:"checkout"`
+	Program   string   `json:"program"`
+	Title     string   `json:"title,omitempty"`
+	ActiveRun *run     `json:"active_run,omitempty"`
 	Status
 }
 
@@ -39,19 +40,24 @@ type Snapshot struct {
 type tracked struct {
 	term    Terminal
 	history []Status
-	managed bool
+	agent   *codexAgent
 }
 type gitCache struct {
 	value Checkout
 	at    time.Time
 }
 type workspace struct {
+	instance                             string
+	lastSave                             []byte
+	pending                              []savedPane
 	mu                                   sync.Mutex
 	p                                    runtimePaths
 	sidebar, home, active, key, endpoint string
 	width, windowWidth                   int
 	manualWidth, agentMode, agentBell    bool
 	terms                                map[string]*tracked
+	runs                                 map[string]run
+	pastRuns                             []string
 	cache                                map[string]gitCache
 	eventKey                             string
 	events                               eventLog
@@ -59,7 +65,7 @@ type workspace struct {
 }
 
 func newWorkspace(p runtimePaths, side string) *workspace {
-	return &workspace{agentBell: true, events: eventLog{instance: randomID(16), waiters: make(chan struct{}, 32)}, p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
+	return &workspace{runs: map[string]run{}, agentBell: true, events: eventLog{instance: randomID(16), waiters: make(chan struct{}, 32)}, p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
 }
 
 // The workspace lock serializes pane swaps, paste buffers and Git mutations.
@@ -88,6 +94,9 @@ func (w *workspace) applyEvent(e statusEvent) bool {
 	}
 	if t := w.terms[e.Pane]; t != nil && t.term.State != "exited" {
 		changed := w.status(t, e.State, e.Reason)
+		if changed {
+			w.saveLocked()
+		}
 		return changed && w.agentBell && e.needsAttention()
 	}
 	return false
@@ -131,16 +140,25 @@ func (w *workspace) refresh() error {
 		}
 		if f[1] == "1" {
 			w.status(t, "exited", "")
+			if t.agent != nil {
+				t.agent.close()
+			}
 			continue
+		}
+		if t.agent != nil && time.Now().After(t.agent.nextProbe) {
+			t.agent.nextProbe = time.Now().Add(5 * time.Second)
+			go w.discoverThread(t.agent)
 		}
 		if f[6] != "" {
 			t.term.CWD = f[6]
 			t.term.Checkout = w.resolve(f[6])
 		}
-		t.term.Program = f[4]
+		if t.agent == nil {
+			t.term.Program = f[4]
+		}
 		t.term.Title = clean(f[5])
 		// A killed process cannot send its final clear record.
-		if t.term.State != "shell" && !t.managed && isShell(f[4]) {
+		if t.term.State != "shell" && t.agent == nil && isShell(f[4]) {
 			w.status(t, "shell", "")
 		}
 		if t.term.State == "shell" && f[4] == "codex" {
@@ -161,7 +179,7 @@ func (w *workspace) refresh() error {
 			w.width = desired
 		}
 	}
-	return nil
+	return w.saveLocked()
 }
 func isShell(name string) bool {
 	return slices.Contains([]string{"bash", "zsh", "fish", "sh", "dash", "ksh", "nu", "tcsh", "csh"}, name)
@@ -181,6 +199,7 @@ func (w *workspace) setAgentMode(enabled bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.agentMode = enabled
+	w.saveLocked()
 }
 
 func (w *workspace) snapshot() Snapshot { w.mu.Lock(); defer w.mu.Unlock(); return w.snapshotLocked() }
@@ -188,7 +207,12 @@ func (w *workspace) snapshotLocked() Snapshot {
 	s := Snapshot{AgentBell: w.agentBell, AgentMode: w.agentMode, Active: w.active, Width: w.width, Endpoint: w.endpoint, Terminals: []Terminal{}, Checkouts: []Checkout{}}
 	all := map[string]Checkout{}
 	for _, t := range w.terms {
-		s.Terminals = append(s.Terminals, t.term)
+		term := t.term
+		if t.agent != nil && t.agent.active != "" {
+			r := w.runs[t.agent.active]
+			term.ActiveRun = &r
+		}
+		s.Terminals = append(s.Terminals, term)
 		if t.term.State != "exited" {
 			all[t.term.Checkout.Path] = t.term.Checkout
 		}
@@ -274,11 +298,14 @@ func (w *workspace) open(path string, codex, repo bool) (Terminal, error) {
 	return w.spawn(path, codex)
 }
 func (w *workspace) spawn(path string, codex bool) (Terminal, error) {
+	return w.spawnTerminal(path, codex, "", false)
+}
+func (w *workspace) spawnTerminal(path string, codex bool, thread string, picker bool) (Terminal, error) {
 	prog := os.Getenv("SHELL")
 	if prog == "" {
 		prog = "/bin/sh"
 	}
-	if codex {
+	if codex || picker {
 		prog = "codex"
 	}
 	exe, err := exec.LookPath(prog)
@@ -288,13 +315,35 @@ func (w *workspace) spawn(path string, codex bool) (Terminal, error) {
 	c := w.resolve(path)
 	// Install the status reader before releasing the process to write its first byte.
 	gate := "start-" + randomID(10)
-	id, err := w.p.tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "kowloon:", "-c", path, w.p.exe, "_run", gate, exe)
+	args := []string{"new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "kowloon:", "-c", path, w.p.exe, "_run", gate}
+	var agent *codexAgent
+	if codex {
+		dir, err := os.MkdirTemp(w.p.dir, "a-")
+		if err != nil {
+			return Terminal{}, err
+		}
+		agent = newCodexAgent(dir, path, c.Path)
+		agent.thread = thread
+		args = append(args, w.p.exe, "_codex", dir, exe, c.Path, thread)
+	} else {
+		args = append(args, exe)
+		if picker {
+			args = append(args, "resume")
+		}
+	}
+	id, err := w.p.tm(args...)
 	if err != nil {
+		if agent != nil {
+			agent.close()
+		}
 		return Terminal{}, err
 	}
 	failed := true
 	defer func() {
 		if failed {
+			if agent != nil {
+				agent.close()
+			}
 			delete(w.terms, id)
 			w.p.tm("kill-pane", "-t", id)
 		}
@@ -306,7 +355,7 @@ func (w *workspace) spawn(path string, codex bool) (Terminal, error) {
 	if err != nil {
 		return Terminal{}, err
 	}
-	t := &tracked{term: Terminal{ID: id, CWD: path, Checkout: c, Program: filepath.Base(exe)}, managed: codex}
+	t := &tracked{term: Terminal{ID: id, CWD: path, Checkout: c, Program: filepath.Base(exe)}, agent: agent}
 	w.terms[id] = t
 	s := "shell"
 	if codex {
@@ -320,7 +369,7 @@ func (w *workspace) spawn(path string, codex bool) (Terminal, error) {
 	}
 	w.status(t, s, "")
 	failed = false
-	return t.term, nil
+	return t.term, w.saveLocked()
 }
 func (w *workspace) addTree(path, branch string) (Terminal, error) {
 	w.mu.Lock()
@@ -334,7 +383,10 @@ func (w *workspace) addTree(path, branch string) (Terminal, error) {
 func (w *workspace) selectTerm(id string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.selectLocked(id, true)
+	if err := w.selectLocked(id, true); err != nil {
+		return err
+	}
+	return w.saveLocked()
 }
 
 // Prefer another terminal in the same repository when the visible shell ends.
@@ -378,9 +430,12 @@ func (w *workspace) closeTerm(id string) error {
 		return err
 	}
 	w.status(t, "exited", "")
+	if t.agent != nil {
+		t.agent.close()
+	}
 	delete(w.terms, id)
 	w.notify()
-	return nil
+	return w.saveLocked()
 }
 func (w *workspace) read(id string, lines int) (string, error) {
 	w.mu.Lock()
@@ -446,6 +501,8 @@ func (w *workspace) resize(width int) error {
 	if err == nil {
 		w.width = width
 		w.manualWidth = true
+		w.width = width
+		return w.saveLocked()
 	}
 	return err
 }

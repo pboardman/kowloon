@@ -44,6 +44,9 @@ type waitResult struct {
 	Status  Status `json:"status"`
 	Matched bool   `json:"matched"`
 }
+type enabledArgs struct {
+	Enabled bool `json:"enabled"`
+}
 type widthArgs struct {
 	Columns int `json:"columns"`
 }
@@ -136,6 +139,11 @@ func (w *workspace) handler() http.Handler {
 	register(s, "close_terminal", "Stop the selected terminal and its running program.", func(a termArgs) (ack, error) { return done(w.closeTerm(a.ID)) })
 	register(s, "read_terminal", "Read the visible terminal, including questions and answer choices. Optionally include scrollback.", func(a readArgs) (screen, error) { out, err := w.read(a.ID, a.Lines); return screen{out}, err })
 	register(s, "send_input", "Send literal text and/or one named key to a terminal. Supported keys: "+strings.Join(keys, ", ")+".", func(a inputArgs) (ack, error) { return done(w.input(a.ID, a.Text, a.Key)) })
+	register(s, "set_agent_mode", "Show a flat list of agent terminals when enabled. Disable to show repositories.", func(a enabledArgs) (ack, error) {
+		w.setAgentMode(a.Enabled)
+		return ack{OK: true}, nil
+	})
+	register(s, "set_agent_bell", "Enable or mute the agent attention bell and save the preference.", func(a enabledArgs) (ack, error) { return done(w.setAgentBell(a.Enabled)) })
 	register(s, "resize_sidebar", "Set the sidebar width in terminal columns.", func(a widthArgs) (ack, error) { return done(w.resize(a.Columns)) })
 	mcp.AddTool(s, &mcp.Tool{Name: "wait_for_state", Description: "Wait for a terminal state: " + strings.Join(states, ", ") + ". Each terminal retains its last 64 transitions."}, func(ctx context.Context, _ *mcp.CallToolRequest, a waitArgs) (*mcp.CallToolResult, waitResult, error) {
 		out, err := w.wait(ctx, a)

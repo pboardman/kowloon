@@ -209,6 +209,10 @@ func serve(p runtimePaths, path string) error {
 	side := os.Getenv("TMUX_PANE")
 	w := newWorkspace(p, side)
 	var err error
+	w.agentBell, err = p.loadAgentBell()
+	if err != nil {
+		return err
+	}
 	w.key, err = secret(p)
 	if err != nil {
 		return err
@@ -250,8 +254,12 @@ func serve(p runtimePaths, path string) error {
 				return
 			}
 			var e statusEvent
-			if json.Unmarshal(buf[:n], &e) == nil {
-				w.event(e)
+			if json.Unmarshal(buf[:n], &e) != nil {
+				continue
+			}
+			if w.applyEvent(e) {
+				// Ring from the visible sidebar, including for agents in parked panes.
+				_, _ = os.Stdout.WriteString("\a")
 			}
 		}
 	}()

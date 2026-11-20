@@ -21,6 +21,14 @@ type statusEvent struct {
 	Reason string
 }
 
+func (e statusEvent) needsAttention() bool {
+	switch e.State {
+	case "done", "blocked", "waiting", "error":
+		return true
+	}
+	return false
+}
+
 // Codex writes OSC 7501 to its PTY. tmux pipe-pane delivers the original bytes,
 // including in parked panes. Retain only an incomplete record between reads.
 var oscStart = []byte("\x1b]7501;")

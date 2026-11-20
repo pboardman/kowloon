@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Exercise the exact same subprocess entry points as the installed binary.
@@ -62,12 +64,74 @@ func TestUnbornWorktree(t *testing.T) {
 func TestStateHistory(t *testing.T) {
 	w := &workspace{terms: map[string]*tracked{"%1": {}}, changed: make(chan struct{})}
 	for _, s := range []string{"working", "waiting", "working", "done"} {
-		w.event(statusEvent{"%1", s, ""})
+		w.applyEvent(statusEvent{"%1", s, ""})
 	}
 	rev := uint64(1)
 	result, err := w.wait(context.Background(), waitArgs{ID: "%1", States: []string{"waiting"}, After: &rev})
 	if err != nil || !result.Matched || result.Status.Revision != 2 {
 		t.Fatal(result, err)
+	}
+}
+
+func TestBellSetting(t *testing.T) {
+	p := runtimePaths{config: t.TempDir()}
+	w := newWorkspace(p, "%0")
+	w.terms["%1"] = &tracked{term: Terminal{ID: "%1"}}
+	w.width = 30
+	u := newUI(w)
+	u.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+
+	check := func(enabled bool, label string) {
+		t.Helper()
+		saved, err := p.loadAgentBell()
+		if err != nil || saved != enabled || w.snapshot().AgentBell != enabled || !strings.Contains(u.View(), label) {
+			t.Fatalf("expected %s, saved=%v, err=%v", label, saved, err)
+		}
+	}
+	check(true, "Agent bell: On")
+	u.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	check(false, "Agent bell: Off")
+	if w.applyEvent(statusEvent{"%1", "blocked", "permission"}) || w.snapshot().Terminals[0].State != "blocked" {
+		t.Fatal("muting the bell must still record the blocked transition")
+	}
+	u.mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: 1})
+	check(true, "Agent bell: On")
+	if w.applyEvent(statusEvent{"%1", "blocked", "permission"}) || !w.applyEvent(statusEvent{"%1", "done", ""}) {
+		t.Fatal("enabling the bell must ring only for new transitions")
+	}
+}
+
+func TestAttentionBellTransitions(t *testing.T) {
+	w := newWorkspace(runtimePaths{}, "%0")
+	w.terms["%1"] = &tracked{term: Terminal{ID: "%1"}}
+	w.terms["%2"] = &tracked{term: Terminal{ID: "%2"}}
+	for _, tc := range []struct {
+		pane, state, reason string
+		ring                bool
+	}{
+		{"%1", "starting", "", false},
+		{"%1", "idle", "", false},
+		{"%1", "working", "", false},
+		{"%1", "waiting", "question", true},
+		{"%1", "waiting", "question", false},
+		{"%2", "waiting", "question", true},
+		{"%1", "blocked", "permission", true},
+		{"%1", "blocked", "auth", true},
+		{"%1", "blocked", "", true},
+		{"%1", "error", "", true},
+		{"%1", "done", "", true},
+		{"%1", "done", "", false},
+		{"%1", "working", "", false},
+		{"%1", "done", "", true},
+		{"%1", "shell", "", false},
+		{"%1", "exited", "", false},
+		{"%1", "error", "", false},
+		{"%missing", "done", "", false},
+	} {
+		e := statusEvent{tc.pane, tc.state, tc.reason}
+		if ring := w.applyEvent(e); ring != tc.ring {
+			t.Errorf("%+v: rang %t, want %t", e, ring, tc.ring)
+		}
 	}
 }
 func TestMCPAuth(t *testing.T) {
@@ -100,6 +164,48 @@ func TestMCPAuth(t *testing.T) {
 	}
 }
 
+func TestAgentModeRows(t *testing.T) {
+	w := newWorkspace(runtimePaths{}, "%0")
+	repo := Checkout{Repo: "/src/kowloon", Path: "/src/kowloon", Branch: "main"}
+	tree := Checkout{Repo: repo.Repo, Path: "/trees/queue", Branch: "feat/queue"}
+	for i, state := range states {
+		id := fmt.Sprintf("%%%d", i+1)
+		w.terms[id] = &tracked{term: Terminal{ID: id, Checkout: repo, Status: Status{State: state}}}
+	}
+	w.active = "%4"
+	w.terms[w.active].term.Checkout = tree
+	w.terms[w.active].term.Title = "Review tests | queue"
+	u := newUI(w)
+	toggle := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}
+	u.key(toggle)
+	if !u.agentMode || u.selected().id != w.active || len(u.rows) != len(states)-2 {
+		t.Fatalf("agent mode selection: %+v", u.rows)
+	}
+	for i, r := range u.rows {
+		term := w.terms[r.id].term
+		status, _ := badge(term)
+		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(r.label, status) {
+			t.Fatalf("agent row: %+v", r)
+		}
+		if term.Checkout.Path == repo.Path && !strings.Contains(r.label, r.id+" kowloon/main") {
+			t.Fatalf("shared checkout missing terminal ID: %+v", r)
+		}
+	}
+	if !strings.Contains(u.selected().label, "kowloon/feat/queue · Review tests") {
+		t.Fatal(u.selected())
+	}
+	w.terms["%2"].term.State = "shell"
+	w.terms[w.active].term.State = "done"
+	u.rebuild()
+	if u.selected().id != w.active || !strings.Contains(u.selected().label, "DONE") || u.rows[0].id == "%2" {
+		t.Fatal(u.rows)
+	}
+	u.key(toggle)
+	if u.agentMode || u.selected().id != w.active || u.rows[0].id != "" {
+		t.Fatal(u.rows)
+	}
+}
+
 func TestLiveWorkspace(t *testing.T) {
 	if os.Getenv("KOWLOON_INTEGRATION") != "1" {
 		t.Skip("set KOWLOON_INTEGRATION=1 for a real tmux server")
@@ -114,6 +220,9 @@ func TestLiveWorkspace(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	if os.Getenv("KOWLOON_TEST_CODEX") == "1" {
+		if err := os.Mkdir(filepath.Join(base, "codex"), 0700); err != nil {
+			t.Fatal(err)
+		}
 		// A real CLI in an isolated test home must not leave a shared daemon behind.
 		codex, err := exec.LookPath("codex")
 		if err != nil {
@@ -289,7 +398,22 @@ func TestLiveWorkspace(t *testing.T) {
 			tool("read_terminal", readArgs{ID: agent.ID}, &view)
 			return strings.Contains(strings.ToLower(view.Text), "codex")
 		})
+		tool("set_agent_mode", enabledArgs{Enabled: true}, nil)
+		eventually(func() bool {
+			view, _ := p.tm("capture-pane", "-p", "-t", side)
+			return strings.Contains(view, " AGENTS") && strings.Contains(view, "a repository/main") && !strings.Contains(view, "▾")
+		})
 		tool("close_terminal", termArgs{agent.ID}, nil)
+		eventually(func() bool {
+			view, _ := p.tm("capture-pane", "-p", "-t", side)
+			return strings.Contains(view, "No agents running")
+		})
+		p.tm("send-keys", "-t", side, "a")
+		eventually(func() bool {
+			var state Snapshot
+			tool("list_workspace", noArgs{}, &state)
+			return !state.AgentMode
+		})
 	}
 	for _, term := range s.Terminals {
 		tool("close_terminal", termArgs{term.ID}, nil)

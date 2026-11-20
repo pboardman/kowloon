@@ -21,11 +21,14 @@ Running `kowloon` starts an empty workspace or reattaches to the running workspa
 | Launch Codex | Type `codex` in a shell. |
 | Resize the sidebar | Drag the divider. Kowloon sizes the sidebar automatically until you set its width. |
 | Use the sidebar with the keyboard | Press Ctrl+B, then Left. Use the arrow keys and Enter. Press `m` for actions or `s` for Settings. |
+| Toggle agent mode | Press Ctrl+B, then `a` to focus the sidebar and toggle the flat agent list. In the sidebar, press `a` directly. |
 | Return to the terminal | Press Ctrl+B, then Right. |
 | Detach | Press Ctrl+B, then `d`. Run Kowloon again to reattach. |
 | Stop the workspace | Run `kowloon --stop`. This terminates all terminals in the workspace. |
 
 Kowloon creates worktrees under `$XDG_DATA_HOME/kowloon/worktrees`. The default base directory is `~/.local/share`. For a new branch, Git starts from the selected checkout. For an existing local branch, Git uses that branch if another worktree does not have it checked out.
+
+Agent mode shows one row per open Codex session, in terminal creation order. Each row shows the current status, checkout, and available task title. An idle agent or a finished turn stays visible until Codex exits. Use the arrow keys and Enter to open a listed terminal.
 
 ## Codex status
 
@@ -40,6 +43,8 @@ Kowloon reads status events directly from each terminal, including terminals in 
 | APPROVAL / SIGN IN | `blocked` | Codex needs permission or authentication. The reason is `permission` or `auth`. |
 | DONE / ERROR | `done` / `error` | Codex finished a turn or reported an error. |
 | Hidden | `exited` | The terminal process ended. MCP can read its final screen until you close the terminal. |
+
+Kowloon rings the terminal bell when Codex finishes a turn, asks a question, needs approval or sign-in, reports another blocker, or reports an error. This includes background agents in either sidebar view. Repeated reports of the same state and reason ring once. The agent bell is on by default. In sidebar Settings, press `b` or click **Agent bell** to switch it off or on. Kowloon saves your choice for future workspaces. To hear the bell, enable audible bells in your terminal settings.
 
 Other interactive programs run in the same terminal pane. V1 tracks agent lifecycle events for Codex.
 
@@ -70,6 +75,8 @@ Start the MCP client in an environment that contains `KOWLOON_MCP_KEY`. For anot
 | `create_worktree` | Create a named checkout and open a shell there. |
 | `launch_codex` | Open an interactive Codex terminal in a directory. |
 | `select_terminal` / `close_terminal` | Focus a terminal or terminate it. |
+| `set_agent_mode` | Set `enabled` to show the flat agent list or clear it to restore the repository tree. `list_workspace` reports `agent_mode`. |
+| `set_agent_bell` | Set `enabled` to turn the agent bell on or off. `list_workspace` reports `agent_bell`. |
 | `resize_sidebar` | Set the width in columns. |
 | `read_terminal` | Read the screen and optional scrollback. |
 | `send_input` | Send literal text, a key, or both to a terminal. |

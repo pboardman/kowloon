@@ -87,6 +87,23 @@ func publishPrivate(path string, data []byte, publish func(string, string) error
 
 func writePrivate(path string, data []byte) error { return publishPrivate(path, data, os.Rename) }
 
+func (p runtimePaths) agentBellPath() string { return filepath.Join(p.config, "agent-bell") }
+
+func (p runtimePaths) loadAgentBell() (bool, error) {
+	data, err := os.ReadFile(p.agentBellPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(string(data)))
+	if err != nil {
+		return false, fmt.Errorf("invalid agent bell setting in %s", p.agentBellPath())
+	}
+	return enabled, nil
+}
+
 func secret(p runtimePaths) (string, error) {
 	return privateKey(p, "mcp.key")
 }

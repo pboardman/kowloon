@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/charmbracelet/x/ansi"
 )
 
 type Terminal struct {
@@ -24,7 +22,14 @@ type Terminal struct {
 	Title    string   `json:"title,omitempty"`
 	Status
 }
+
+func (t Terminal) hasAgent() bool {
+	return t.State != "" && t.State != "shell" && t.State != "exited"
+}
+
 type Snapshot struct {
+	AgentBell bool       `json:"agent_bell"`
+	AgentMode bool       `json:"agent_mode"`
 	Active    string     `json:"active"`
 	Terminals []Terminal `json:"terminals"`
 	Checkouts []Checkout `json:"checkouts"`
@@ -45,7 +50,7 @@ type workspace struct {
 	p                                    runtimePaths
 	sidebar, home, active, key, endpoint string
 	width, windowWidth                   int
-	manualWidth                          bool
+	manualWidth, agentMode, agentBell    bool
 	terms                                map[string]*tracked
 	cache                                map[string]gitCache
 	eventKey                             string
@@ -54,14 +59,14 @@ type workspace struct {
 }
 
 func newWorkspace(p runtimePaths, side string) *workspace {
-	return &workspace{events: eventLog{instance: randomID(16), waiters: make(chan struct{}, 32)}, p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
+	return &workspace{agentBell: true, events: eventLog{instance: randomID(16), waiters: make(chan struct{}, 32)}, p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
 }
 
 // The workspace lock serializes pane swaps, paste buffers and Git mutations.
 func (w *workspace) notify() { close(w.changed); w.changed = make(chan struct{}) }
-func (w *workspace) status(t *tracked, state, reason string) {
+func (w *workspace) status(t *tracked, state, reason string) bool {
 	if t.term.State == state && t.term.Reason == reason {
-		return
+		return false
 	}
 	s := Status{state, reason, t.term.Revision + 1}
 	t.term.Status = s
@@ -71,16 +76,21 @@ func (w *workspace) status(t *tracked, state, reason string) {
 		t.history = slices.Clone(t.history[len(t.history)-64:])
 	}
 	w.notify()
+	return true
 }
-func (w *workspace) event(e statusEvent) {
+
+// applyEvent records the transition and reports whether to ring the sidebar bell.
+func (w *workspace) applyEvent(e statusEvent) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !slices.Contains(states, e.State) || !slices.Contains([]string{"", "auth", "permission", "question"}, e.Reason) {
-		return
+		return false
 	}
 	if t := w.terms[e.Pane]; t != nil && t.term.State != "exited" {
-		w.status(t, e.State, e.Reason)
+		changed := w.status(t, e.State, e.Reason)
+		return changed && w.agentBell && e.needsAttention()
 	}
+	return false
 }
 func (w *workspace) resolve(path string) Checkout {
 	if c, ok := w.cache[path]; ok && time.Since(c.at) < 2*time.Second {
@@ -143,15 +153,7 @@ func (w *workspace) refresh() error {
 		}
 	}
 	if !w.manualWidth && w.windowWidth >= 30 {
-		desired := 28
-		for _, c := range w.snapshotLocked().Checkouts {
-			label := c.Branch
-			if c.Repo == c.Path {
-				label = filepath.Base(c.Repo) + "  · " + label
-			}
-			desired = max(desired, ansi.StringWidth(label)+4)
-		}
-		desired = min(desired, w.windowWidth*2/5)
+		desired := autoSidebarWidth(w.snapshotLocked(), w.windowWidth)
 		if desired != w.width {
 			if _, err := w.p.tm("resize-pane", "-t", w.sidebar, "-x", strconv.Itoa(desired)); err != nil {
 				return err
@@ -165,9 +167,25 @@ func isShell(name string) bool {
 	return slices.Contains([]string{"bash", "zsh", "fish", "sh", "dash", "ksh", "nu", "tcsh", "csh"}, name)
 }
 
+func (w *workspace) setAgentBell(enabled bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := writePrivate(w.p.agentBellPath(), []byte(strconv.FormatBool(enabled)+"\n")); err != nil {
+		return err
+	}
+	w.agentBell = enabled
+	return nil
+}
+
+func (w *workspace) setAgentMode(enabled bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.agentMode = enabled
+}
+
 func (w *workspace) snapshot() Snapshot { w.mu.Lock(); defer w.mu.Unlock(); return w.snapshotLocked() }
 func (w *workspace) snapshotLocked() Snapshot {
-	s := Snapshot{Active: w.active, Width: w.width, Endpoint: w.endpoint, Terminals: []Terminal{}, Checkouts: []Checkout{}}
+	s := Snapshot{AgentBell: w.agentBell, AgentMode: w.agentMode, Active: w.active, Width: w.width, Endpoint: w.endpoint, Terminals: []Terminal{}, Checkouts: []Checkout{}}
 	all := map[string]Checkout{}
 	for _, t := range w.terms {
 		s.Terminals = append(s.Terminals, t.term)

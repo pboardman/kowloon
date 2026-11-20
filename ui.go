@@ -11,13 +11,14 @@ import (
 )
 
 const (
-	muted  = "\x1b[38;5;246m"
-	accent = "\x1b[1;38;5;79m"
-	title  = "\x1b[1;38;5;252m"
-	amber  = "\x1b[1;38;5;221m"
-	red    = "\x1b[1;38;5;210m"
-	blue   = "\x1b[1;38;5;117m"
-	reset  = "\x1b[0m"
+	headerColor = "\x1b[1;38;5;203m"
+	muted       = "\x1b[38;5;246m"
+	accent      = "\x1b[1;38;5;79m"
+	title       = "\x1b[1;38;5;252m"
+	amber       = "\x1b[1;38;5;221m"
+	red         = "\x1b[1;38;5;210m"
+	blue        = "\x1b[1;38;5;117m"
+	reset       = "\x1b[0m"
 )
 
 type row struct{ key, path, id, label, style string }
@@ -27,7 +28,7 @@ type ui struct {
 	width, height, cursor, offset, menuIndex int
 	rows                                     []row
 	active, mode, entry, notice, path, id    string
-	reveal, eventKey                         bool
+	reveal, eventKey, agentMode, agentBell   bool
 	pressed                                  tea.MouseButton
 }
 
@@ -71,14 +72,67 @@ func badge(t Terminal) (string, string) {
 	}
 	return "", muted
 }
-func (u *ui) rebuild() {
-	s := u.w.snapshot()
-	activeChanged := u.active != s.Active
-	u.active = s.Active
-	old := ""
-	if u.cursor >= 0 && u.cursor < len(u.rows) {
-		old = u.rows[u.cursor].key
+func terminalRow(t Terminal, active, indent, agentLabel string) row {
+	marker := " "
+	if t.ID == active {
+		marker = "›"
 	}
+	status, color := badge(t)
+	label := t.Program
+	if status != "" {
+		label = status + "  " + agentLabel
+		dir := filepath.Base(t.Checkout.Path)
+		if task := strings.TrimSuffix(t.Title, " | "+dir); task != "" && task != dir {
+			label += " · " + task
+		}
+	}
+	return row{t.ID, t.Checkout.Path, t.ID, marker + indent + label, color}
+}
+
+func agentRows(s Snapshot) []row {
+	// A shared checkout can have several agents with the same status and title.
+	counts := make(map[string]int)
+	for _, t := range s.Terminals {
+		if t.hasAgent() {
+			counts[t.Checkout.Path]++
+		}
+	}
+	var rows []row
+	for _, t := range s.Terminals {
+		if !t.hasAgent() {
+			continue
+		}
+		project := filepath.Base(t.Checkout.Repo)
+		if t.Checkout.Branch != "" {
+			project += "/" + t.Checkout.Branch
+		}
+		if counts[t.Checkout.Path] > 1 {
+			project = t.ID + " " + project
+		}
+		rows = append(rows, terminalRow(t, s.Active, " ", project))
+	}
+	return rows
+}
+
+func autoSidebarWidth(s Snapshot, windowWidth int) int {
+	width := 28
+	if s.AgentMode {
+		for _, r := range agentRows(s) {
+			width = max(width, ansi.StringWidth(r.label)+1)
+		}
+	} else {
+		for _, c := range s.Checkouts {
+			label := c.Branch
+			if c.Repo == c.Path {
+				label = filepath.Base(c.Repo) + "  · " + label
+			}
+			width = max(width, ansi.StringWidth(label)+4)
+		}
+	}
+	return min(width, windowWidth*2/5)
+}
+
+func repositoryRows(s Snapshot) []row {
 	rows := []row{}
 	last := ""
 	for _, c := range s.Checkouts {
@@ -99,35 +153,36 @@ func (u *ui) rebuild() {
 			if t.State == "exited" || t.Checkout.Path != c.Path {
 				continue
 			}
-			status, color := badge(t)
-			name := t.Program
-			if status != "" {
-				name = "Codex"
-			}
-			marker := " "
-			if t.ID == s.Active {
-				marker = "›"
-			}
-			label := marker + indent
-			if status != "" {
-				label += status + "  "
-			}
-			label += name
-			if status != "" && t.Title != "" {
-				// Codex places the project last in its default title. The tree already names it.
-				task := strings.TrimSuffix(t.Title, " | "+filepath.Base(c.Path))
-				if task != filepath.Base(c.Path) && task != "" {
-					label += " · " + task
-				}
-			}
-			rows = append(rows, row{t.ID, c.Path, t.ID, label, color})
+			rows = append(rows, terminalRow(t, s.Active, indent, "Codex"))
 		}
 	}
-	u.rows = rows
-	for i, r := range rows {
-		if (activeChanged && r.id != "" && r.id == s.Active) || (!activeChanged && r.key == old) {
+	return rows
+}
+
+func (u *ui) rebuild() {
+	s := u.w.snapshot()
+	old := u.selected().key
+	if u.active != s.Active {
+		old = s.Active
+	}
+	u.active = s.Active
+	if u.agentMode != s.AgentMode {
+		u.cursor, u.offset = 0, 0
+	}
+	u.agentMode = s.AgentMode
+	u.agentBell = s.AgentBell
+	if s.AgentMode {
+		u.rows = agentRows(s)
+	} else {
+		u.rows = repositoryRows(s)
+	}
+	for i, r := range u.rows {
+		if r.key == old {
 			u.cursor = i
 			break
+		}
+		if r.id != "" && r.id == s.Active {
+			u.cursor = i
 		}
 	}
 	u.scroll()
@@ -247,6 +302,15 @@ func (u *ui) copyKey() {
 }
 func (u *ui) key(k tea.KeyMsg) {
 	key := k.String()
+	// The tmux prefix binding forwards F12 so it cannot type into a branch prompt.
+	if key == "f12" || (key == "a" && u.mode == "") {
+		u.mode = ""
+		u.reveal = false
+		u.notice = ""
+		u.w.setAgentMode(!u.agentMode)
+		u.rebuild()
+		return
+	}
 	if key == "esc" {
 		u.mode = ""
 		u.notice = ""
@@ -256,6 +320,8 @@ func (u *ui) key(k tea.KeyMsg) {
 	switch u.mode {
 	case "settings":
 		switch key {
+		case "b":
+			u.report(u.w.setAgentBell(!u.agentBell))
 		case "tab":
 			u.eventKey = !u.eventKey
 			u.reveal = false
@@ -376,6 +442,8 @@ func (u *ui) mouse(m tea.MouseMsg) {
 		return
 	case "settings":
 		switch m.Y {
+		case 1:
+			u.report(u.w.setAgentBell(!u.agentBell))
 		case 3:
 			u.reveal = !u.reveal
 		case 4:
@@ -454,13 +522,18 @@ func (u *ui) View() string {
 			lines[y] = color + ansi.Truncate(clean(s), u.width, "…") + reset
 		}
 	}
-	put(0, " KOWLOON"+strings.Repeat(" ", u.newButtonColumn()-len(" KOWLOON"))+"+ New ", accent)
+	put(0, " KOWLOON"+strings.Repeat(" ", u.newButtonColumn()-len(" KOWLOON"))+"+ New ", headerColor)
 	put(1, strings.Repeat("─", u.width), muted)
 	footer := " s  Settings"
 	put(u.height-1, footer, muted)
 	switch u.mode {
 	case "settings":
 		put(0, " Settings", title)
+		bell := "Off"
+		if u.agentBell {
+			bell = "On"
+		}
+		put(1, " [b] Agent bell: "+bell, title)
 		label := " MCP control key"
 		if u.eventKey {
 			label = " MCP events-only key"
@@ -518,7 +591,14 @@ func (u *ui) View() string {
 		put(5, " [n] Cancel", muted)
 		put(u.height-1, " Esc  Back", muted)
 	default:
-		put(2, " REPOSITORIES", muted)
+		heading, toggle := " REPOSITORIES", "a Agents"
+		if u.agentMode {
+			heading, toggle = " AGENTS", "a Repos"
+			if len(u.rows) == 0 {
+				put(3, " No agents running", muted)
+			}
+		}
+		put(2, heading, muted)
 		for i, r := range u.rows {
 			y := 3 + i - u.offset
 			if y < 3 || y >= u.height-4 {
@@ -531,7 +611,7 @@ func (u *ui) View() string {
 			put(y, r.label, style)
 		}
 		put(u.height-3, " n New   m Actions", muted)
-		put(u.height-2, " w Worktree", muted)
+		put(u.height-2, " "+toggle+"   w Worktree", muted)
 	}
 	if u.notice != "" {
 		put(u.height-2, " "+u.notice, amber)

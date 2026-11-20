@@ -51,7 +51,7 @@ func TestQueueReplayResetAndCancellation(t *testing.T) {
 	head := read("").Next
 	ready := make(chan eventPage, 1)
 	go func() { page, _ := w.readEvents(t.Context(), eventArgs{Cursor: head, Wait: 5}); ready <- page }()
-	w.event(statusEvent{Pane: "%not-tracked", State: "waiting", Reason: "question"})
+	w.applyEvent(statusEvent{Pane: "%not-tracked", State: "waiting", Reason: "question"})
 	w.mu.Lock()
 	w.status(term, "waiting", "question")
 	w.mu.Unlock()

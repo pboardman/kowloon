@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -147,9 +146,8 @@ func (w *workspace) handler() http.Handler {
 			http.NotFound(rw, r)
 			return
 		}
-		host, _, err := net.SplitHostPort(r.Host)
-		if err != nil || (host != "127.0.0.1" && host != "localhost") || r.Header.Get("Origin") != "" {
-			http.Error(rw, "Local MCP clients only", http.StatusForbidden)
+		if r.Header.Get("Origin") != "" {
+			http.Error(rw, "Browser origins are not supported", http.StatusForbidden)
 			return
 		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")

@@ -221,12 +221,13 @@ func serve(p runtimePaths, path string) error {
 	if err != nil || n < 0 || n > 65535 {
 		return errors.New("invalid KOWLOON_PORT")
 	}
-	ln, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", port))
+	ln, err := net.Listen("tcp", net.JoinHostPort("", port))
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
-	w.endpoint = "http://" + ln.Addr().String() + "/mcp"
+	// The CLI on this host always connects through loopback, including with port 0.
+	w.endpoint = fmt.Sprintf("http://127.0.0.1:%d/mcp", ln.Addr().(*net.TCPAddr).Port)
 	eventPath := filepath.Join(p.dir, "events")
 	os.Remove(eventPath)
 	events, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: eventPath, Net: "unixgram"})

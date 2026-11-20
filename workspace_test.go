@@ -77,7 +77,14 @@ func TestMCPAuth(t *testing.T) {
 		auth, origin, host string
 		want               int
 	}{
-		{"", "", "localhost:9417", 401}, {"Bearer bad", "", "localhost:9417", 401}, {"Bearer " + w.key, "http://foreign.test", "localhost:9417", 403}, {"Bearer " + w.key, "", "foreign.test:9417", 403}, {"Bearer " + w.key, "", "127.0.0.1:9417", 200},
+		{"", "", "localhost:9417", 401},
+		{"", "", "10.0.1.2:9417", 401},
+		{"Bearer bad", "", "10.0.1.2:9417", 401},
+		{"Bearer " + w.key, "http://foreign.test", "10.0.1.2:9417", 403},
+		{"Bearer " + w.key, "", "desktop.lan:9417", 200},
+		{"Bearer " + w.key, "", "10.0.1.2:9417", 200},
+		{"Bearer " + w.key, "", "[fd00::2]:9417", 200},
+		{"Bearer " + w.key, "", "127.0.0.1:9417", 200},
 	} {
 		r := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`))
 		r.Host = tc.host

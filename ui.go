@@ -464,7 +464,7 @@ func (u *ui) View() string {
 			}
 			y++
 		}
-		put(y, " MCP endpoint", accent)
+		put(y, " Local MCP endpoint", accent)
 		for i, part := range chunks(u.w.endpoint, max(1, u.width-2)) {
 			put(y+i+1, " "+part, muted)
 		}

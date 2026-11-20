@@ -45,9 +45,11 @@ Other interactive programs run in the same terminal pane. V1 tracks agent lifecy
 
 ## Connect an MCP client
 
-The Model Context Protocol (MCP) lets a client read and control Kowloon. Kowloon starts a local HTTP server at `http://127.0.0.1:9417/mcp`. Every request requires the access key. A client with this key can read terminal contents and send shell commands.
+The Model Context Protocol (MCP) lets a client read and control Kowloon. Kowloon listens on all network interfaces on port 9417. Local clients can use `http://127.0.0.1:9417/mcp`. Every request requires the access key. A client with this key can read terminal contents and send shell commands.
 
-Open Settings in the sidebar to see the endpoint. Select Reveal key to see the key or Copy key to copy it. Copy uses the tmux clipboard and forwards the key to the system clipboard when the terminal allows clipboard writes.
+For Linden on another machine, use `http://<kowloon-host>:9417/mcp` with the IP address or hostname of the Kowloon machine. Set the header name to `Authorization` and the value to `Bearer <your-key>`. HTTP sends the key unencrypted.
+
+Open Settings in the sidebar to see the local endpoint. Select Reveal key to see the key or Copy key to copy it. Copy uses the tmux clipboard and forwards the key to the system clipboard when the terminal allows clipboard writes.
 
 In an external Bash shell, run these commands to register Kowloon with Codex. Paste the key at the hidden prompt.
 

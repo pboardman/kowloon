@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,11 +86,23 @@ func dispatch(args []string) error {
 				return syscall.Exec(a[2], a[2:], os.Environ())
 			}
 		case "_sidebar":
-			if len(a) == 3 {
-				return serve(p, a[1], a[2])
+			if len(a) == 4 {
+				addr, err := netip.ParseAddrPort(a[3])
+				if err != nil {
+					return err
+				}
+				return serve(p, a[1], a[2], addr)
 			}
-			if len(a) == 2 {
-				return serve(p, a[1], "restore")
+			if len(a) == 2 || len(a) == 3 {
+				addr, err := p.mcpAddress()
+				if err != nil {
+					return err
+				}
+				mode := "restore"
+				if len(a) == 3 {
+					mode = a[2]
+				}
+				return serve(p, a[1], mode, addr)
 			}
 		case "_empty":
 			fmt.Println("Choose + New in the sidebar to open a terminal.")
@@ -146,6 +160,10 @@ func start(p runtimePaths, path string, restart, fresh bool) error {
 	if err := writePrivate(filepath.Join(p.dir, "tmux.conf"), tmuxConfig); err != nil {
 		return err
 	}
+	addr, err := p.mcpAddress()
+	if err != nil {
+		return err
+	}
 	_, existing := p.tm("has-session", "-t", "=kowloon")
 	mode := "restore"
 	if fresh {
@@ -171,7 +189,7 @@ func start(p runtimePaths, path string, restart, fresh bool) error {
 			if _, err = p.tm("set-option", "-t", "kowloon", "@ready", "0"); err != nil {
 				return err
 			}
-			if _, err = p.tm("respawn-pane", "-k", "-t", "kowloon:workspace.0", "-c", p.dir, p.exe, "_sidebar", "", "live"); err != nil {
+			if _, err = p.tm("respawn-pane", "-k", "-t", "kowloon:workspace.0", "-c", p.dir, p.exe, "_sidebar", "", "live", addr.String()); err != nil {
 				return err
 			}
 		}
@@ -184,7 +202,7 @@ func start(p runtimePaths, path string, restart, fresh bool) error {
 		if path != "" {
 			args = append(args, "-c", path)
 		}
-		_, err = p.tm(append(args, p.exe, "_sidebar", path, mode)...)
+		_, err = p.tm(append(args, p.exe, "_sidebar", path, mode, addr.String())...)
 		if err != nil {
 			return err
 		}
@@ -214,15 +232,54 @@ func start(p runtimePaths, path string, restart, fresh bool) error {
 	return errors.New("workspace startup timed out")
 }
 
+func mcpBindAddress(value string) (netip.Addr, error) {
+	if value == "" || value == "localhost" {
+		return netip.MustParseAddr("127.0.0.1"), nil
+	}
+	ip, err := netip.ParseAddr(value)
+	if err != nil || ip.IsMulticast() {
+		return netip.Addr{}, errors.New("bind must be localhost or a local IP address")
+	}
+	ip = ip.Unmap()
+	if !ip.IsUnspecified() && !localMCPHost(ip.String()) {
+		return netip.Addr{}, fmt.Errorf("bind address %s is not assigned to this machine", ip)
+	}
+	return ip, nil
+}
+
+func localMCPHost(host string) bool {
+	ip, err := netip.ParseAddr(host)
+	if err != nil || ip.IsUnspecified() {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	// Only send the key directly to an address assigned to this machine.
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		prefix, err := netip.ParsePrefix(addr.String())
+		if err == nil && prefix.Addr().Unmap() == ip.WithZone("").Unmap() {
+			return true
+		}
+	}
+	return false
+}
+
+var localHTTPTransport = &http.Transport{} // A local control request must bypass HTTP proxies.
+
 type bearerTransport string
 
 func (token bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL.Scheme != "http" || r.URL.Hostname() != "127.0.0.1" {
+	if r.URL.Scheme != "http" || !localMCPHost(r.URL.Hostname()) {
 		return nil, errors.New("invalid local MCP endpoint")
 	}
 	copy := r.Clone(r.Context())
 	copy.Header.Set("Authorization", "Bearer "+string(token))
-	return http.DefaultTransport.RoundTrip(copy)
+	return localHTTPTransport.RoundTrip(copy)
 }
 
 // Older controllers do not offer save_session. Their panes can still be adopted.
@@ -269,7 +326,7 @@ func callRunning(p runtimePaths, name string, args any) error {
 	return nil
 }
 
-func serve(p runtimePaths, path, mode string) error {
+func serve(p runtimePaths, path, mode string, address netip.AddrPort) error {
 	side := os.Getenv("TMUX_PANE")
 	w := newWorkspace(p, side)
 	var err error
@@ -281,28 +338,33 @@ func serve(p runtimePaths, path, mode string) error {
 	if err != nil {
 		return err
 	}
-	port := os.Getenv("KOWLOON_PORT")
-	if port == "" {
-		port = "9417"
+	host := address.Addr()
+	network := "tcp4"
+	if host.Is6() {
+		network = "tcp6"
 	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 0 || n > 65535 {
-		return errors.New("invalid KOWLOON_PORT")
-	}
-	addr := net.JoinHostPort("", port)
-	ln, err := net.Listen("tcp", addr)
+	addr := address.String()
+	ln, err := net.Listen(network, addr)
 	if mode == "live" {
 		for attempt := 0; attempt < 20 && errors.Is(err, syscall.EADDRINUSE); attempt++ {
 			time.Sleep(50 * time.Millisecond)
-			ln, err = net.Listen("tcp", addr)
+			ln, err = net.Listen(network, addr)
 		}
 	}
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
-	// The CLI on this host always connects through loopback, including with port 0.
-	w.endpoint = fmt.Sprintf("http://127.0.0.1:%d/mcp", ln.Addr().(*net.TCPAddr).Port)
+	// Use loopback for wildcard listeners and the bound interface otherwise.
+	endpoint := ln.Addr().(*net.TCPAddr).AddrPort()
+	if host.IsUnspecified() {
+		loopback := netip.IPv6Loopback()
+		if host.Is4() {
+			loopback = netip.MustParseAddr("127.0.0.1")
+		}
+		endpoint = netip.AddrPortFrom(loopback, endpoint.Port())
+	}
+	w.endpoint = (&url.URL{Scheme: "http", Host: endpoint.String(), Path: "/mcp"}).String()
 	eventPath := filepath.Join(p.dir, "events")
 	os.Remove(eventPath)
 	events, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: eventPath, Net: "unixgram"})

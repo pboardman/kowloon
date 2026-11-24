@@ -65,9 +65,20 @@ Other interactive programs run in the same terminal pane. V1 tracks agent lifecy
 
 ## Connect an MCP client
 
-The Model Context Protocol (MCP) lets a client read and control Kowloon. Kowloon listens on all network interfaces on port 9417. Local clients can use `http://127.0.0.1:9417/mcp`. Every request requires a bearer key. A client with the control key can read terminal contents and send shell commands.
+The Model Context Protocol (MCP) lets a client read and control Kowloon. By default, Kowloon listens only on this machine. Local clients can use `http://127.0.0.1:9417/mcp`. Every request requires a bearer key. A client with the control key can read terminal contents and send shell commands.
 
-For Linden on another machine, use `http://<kowloon-host>:9417/mcp` with the IP address or hostname of the Kowloon machine. Set the header name to `Authorization` and the value to `Bearer <your-key>`. HTTP sends the key unencrypted. Use HTTPS or an encrypted tunnel across untrusted networks.
+On first start, Kowloon creates `~/.config/kowloon/config.json` on Linux. If you set `XDG_CONFIG_HOME`, look under `$XDG_CONFIG_HOME/kowloon`. On macOS, the file is in `~/Library/Application Support/kowloon/`.
+
+```json
+{
+  "bind": "127.0.0.1",
+  "port": 9417
+}
+```
+
+To allow remote access, set `bind` to an IP address on the Kowloon machine. Use `0.0.0.0` for all IPv4 interfaces or `::` for all IPv6 interfaces. Set `port` to the TCP port you want. After editing the file, run `kowloon --restart` to apply it.
+
+From a remote MCP client, use `http://<kowloon-host>:9417/mcp` and set the `Authorization` header to `Bearer <your-key>`. HTTP sends the key and terminal traffic unencrypted. Use an encrypted VPN or tunnel across untrusted networks.
 
 Open Settings in the sidebar to see the local endpoint. Press `r` to reveal the MCP key or `c` to copy it. Copy uses the tmux clipboard and forwards the key to the system clipboard when the terminal allows clipboard writes.
 
@@ -81,7 +92,7 @@ codex mcp add kowloon --url http://127.0.0.1:9417/mcp --bearer-token-env-var KOW
 codex
 ```
 
-Start the MCP client in an environment that contains `KOWLOON_MCP_KEY`. For another port, set `KOWLOON_PORT` before starting the workspace and use the endpoint in Settings. To start Kowloon without attaching a terminal, run `kowloon --detach /path/to/repo`.
+Start the MCP client in an environment that contains `KOWLOON_MCP_KEY`. To start Kowloon without attaching a terminal, run `kowloon --detach /path/to/repo`.
 
 | Tool | Action |
 | --- | --- |

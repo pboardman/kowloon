@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -327,7 +329,7 @@ func TestLiveWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(base)
-	for k, v := range map[string]string{"XDG_RUNTIME_DIR": base, "XDG_CONFIG_HOME": base + "/config", "XDG_DATA_HOME": base + "/data", "KOWLOON_PORT": "0", "HOME": base, "SHELL": "/bin/sh", "TERM": "xterm-256color", "CODEX_HOME": base + "/codex", "TMUX": "", "TMUX_PANE": ""} {
+	for k, v := range map[string]string{"XDG_RUNTIME_DIR": base, "XDG_CONFIG_HOME": base + "/config", "XDG_DATA_HOME": base + "/data", "HOME": base, "SHELL": "/bin/sh", "TERM": "xterm-256color", "CODEX_HOME": base + "/codex", "TMUX": "", "TMUX_PANE": ""} {
 		t.Setenv(k, v)
 	}
 	var releaseModel func()
@@ -342,6 +344,17 @@ func TestLiveWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setBind := func(host string) {
+		t.Helper()
+		cfg, err := json.Marshal(listenerConfig{Bind: host, Port: 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writePrivate(filepath.Join(p.config, "config.json"), cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setBind("127.0.0.1")
 	repo := base + "/a repository"
 	if err = os.Mkdir(repo, 0700); err != nil {
 		t.Fatal(err)
@@ -356,6 +369,60 @@ func TestLiveWorkspace(t *testing.T) {
 	if err = dispatch([]string{"--detach"}); err != nil {
 		t.Fatal(err)
 	}
+	// The default must reject connections via a LAN address even with a valid key.
+	readEndpoint := func() *url.URL {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(p.dir, "endpoint"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, err := url.Parse(string(raw))
+		if err != nil || u.Scheme != "http" || u.Path != "/mcp" {
+			t.Fatalf("invalid endpoint %q: %v", raw, err)
+		}
+		return u
+	}
+	if u := readEndpoint(); u.Hostname() != "127.0.0.1" {
+		t.Fatalf("default endpoint = %s", u)
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil || ip.To4() == nil || !ip.IsGlobalUnicast() {
+			continue
+		}
+		port := readEndpoint().Port()
+		if conn, err := net.DialTimeout("tcp4", net.JoinHostPort(ip.String(), port), time.Second); err == nil {
+			conn.Close()
+			t.Fatal("default listener accepted a LAN connection")
+		}
+		setBind(ip.String())
+		if err := dispatch([]string{"--restart"}); err != nil {
+			t.Fatal(err)
+		}
+		if u := readEndpoint(); u.Hostname() != ip.String() {
+			t.Fatalf("interface endpoint = %s", u)
+		}
+		if err := callRunning(p, "save_session", noArgs{}); err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	setBind("0.0.0.0")
+	if err := dispatch([]string{"--restart"}); err != nil {
+		t.Fatal(err)
+	}
+	if readEndpoint().Hostname() != "127.0.0.1" {
+		t.Fatal("wildcard listener did not publish a usable local endpoint")
+	}
+	setBind("127.0.0.1")
+	if err := dispatch([]string{"--restart"}); err != nil {
+		t.Fatal(err)
+	}
+
 	k, err := secret(p)
 	if err != nil {
 		t.Fatal(err)

@@ -90,6 +90,7 @@ func startTestModel(t *testing.T, base string) func() {
 				kind = ""
 			}
 		}
+		receivedGreen := strings.Contains(string(body), "Choose the forest green shade.")
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n")
 		w.(http.Flusher).Flush()
@@ -101,6 +102,9 @@ func startTestModel(t *testing.T, base string) func() {
 			return
 		}
 		item := `{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Local test reply."}]}`
+		if receivedGreen {
+			item = strings.Replace(item, "Local test reply.", "Received the requested shade.", 1)
+		}
 		if kind == "approval" {
 			item = `{"id":"fc_approval","type":"function_call","call_id":"call_approval","name":"exec_command","arguments":"{\"cmd\":\"pwd\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Print the test directory?\"}"}`
 		}
@@ -249,6 +253,17 @@ func testManagedRun(t *testing.T, tool func(string, any, any), agent Terminal, r
 		t.Fatal("approval did not resolve", waited)
 	}
 
+	var conversations conversationList
+	tool("list_conversations", noArgs{}, &conversations)
+	var conversationID string
+	for _, c := range conversations.Conversations {
+		if c.ID == agent.ID {
+			conversationID = c.ID
+		}
+	}
+	if conversationID == "" {
+		t.Fatal("managed agent missing from conversations", conversations)
+	}
 	var question run
 	tool("submit_prompt", promptArgs{ID: agent.ID, Prompt: "fixture-question"}, &question)
 	tool("wait_for_run", runWaitArgs{RunID: question.ID, Seconds: 6}, &waited)
@@ -256,10 +271,62 @@ func testManagedRun(t *testing.T, tool func(string, any, any), agent Terminal, r
 		tool("read_terminal", readArgs{ID: agent.ID, Lines: 40}, &view)
 		t.Fatalf("question status %+v; screen %s", waited, view.Text)
 	}
-	tool("send_input", inputArgs{ID: agent.ID, Key: "Enter"}, nil)
+	var next conversationEvent
+	for range 8 {
+		next = conversationEvent{}
+		tool("wait_for_next_event", conversationArgs{ID: conversationID}, &next)
+		if next.Question != nil {
+			break
+		}
+	}
+	var pending questionList
+	tool("list_questions", questionFilter{RunID: question.ID}, &pending)
+	if len(pending.Requests) != 1 {
+		t.Fatal(pending)
+	}
+	q := pending.Requests[0]
+	if q.RunID != question.ID || q.TerminalID != agent.ID || len(q.Questions) != 1 || q.Questions[0].Question != "Which color?" || len(q.Questions[0].Options) != 2 || q.Questions[0].Options[1].Label != "Green" {
+		t.Fatal(q)
+	}
+	if next.Question == nil || next.Question.RequestID != q.RequestID || next.Event == nil || next.Event.Subject != question.ID {
+		t.Fatal("missing structured question", next)
+	}
+	if err := dispatch([]string{"--restart"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		tool("list_questions", questionFilter{RunID: question.ID}, &pending)
+		if len(pending.Requests) == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(pending.Requests) != 1 || pending.Requests[0].RequestID != q.RequestID {
+		t.Fatal("lost the pending question during restart", pending)
+	}
+	id := q.RequestID
+	var receipt answerReceipt
+	tool("answer_question", answerArgs{id, map[string]string{"pick": "Choose the forest green shade."}}, &receipt)
+	if receipt.Status != "sent" || receipt.RequestID != id {
+		t.Fatal(receipt)
+	}
 	tool("wait_for_run", runWaitArgs{RunID: question.ID, States: []string{"finished"}, Seconds: 4}, &waited)
 	if !waited.Matched {
 		tool("read_terminal", readArgs{ID: agent.ID, Lines: 40}, &view)
 		t.Fatalf("question did not resolve: %+v; screen %s", waited, view.Text)
 	}
+	tool("list_questions", questionFilter{RunID: question.ID}, &pending)
+	if len(pending.Requests) != 0 {
+		t.Fatal(pending)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		tool("read_terminal", readArgs{ID: agent.ID, Lines: 100}, &view)
+		if strings.Contains(view.Text, "Received the requested shade.") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("Codex did not pass the written answer to the model", view.Text)
 }

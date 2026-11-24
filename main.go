@@ -281,13 +281,6 @@ func serve(p runtimePaths, path, mode string) error {
 	if err != nil {
 		return err
 	}
-	w.eventKey, err = privateKey(p, "events.key")
-	if err != nil {
-		return err
-	}
-	if w.key == w.eventKey {
-		return errors.New("MCP control and event keys must differ")
-	}
 	port := os.Getenv("KOWLOON_PORT")
 	if port == "" {
 		port = "9417"

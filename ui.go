@@ -1,6 +1,7 @@
 package main
 
 import (
+	"iter"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 const (
 	headerColor = "\x1b[1;38;5;203m"
+	divider     = "\x1b[38;5;239m"
 	muted       = "\x1b[38;5;246m"
 	accent      = "\x1b[1;38;5;79m"
 	title       = "\x1b[1;38;5;252m"
@@ -21,14 +23,14 @@ const (
 	reset       = "\x1b[0m"
 )
 
-type row struct{ key, path, id, label, style string }
+type row struct{ key, path, id, label, style, detail string }
 type tick time.Time
 type ui struct {
 	w                                        *workspace
 	width, height, cursor, offset, menuIndex int
 	rows                                     []row
 	active, mode, entry, notice, path, id    string
-	reveal, eventKey, agentMode, agentBell   bool
+	reveal, agentMode, agentBell             bool
 	pressed                                  tea.MouseButton
 }
 
@@ -45,67 +47,63 @@ func pulse() tea.Cmd {
 	return tea.Tick(600*time.Millisecond, func(t time.Time) tea.Msg { return tick(t) })
 }
 func (u *ui) Init() tea.Cmd { return pulse() }
-func badge(t Terminal) (icon, status, color string) {
+func badge(t Terminal) (icon, color string) {
 	if t.ActiveRun != nil && t.State != "exited" {
 		switch t.ActiveRun.Status {
 		case "waiting_for_approval":
-			return "!", "APPROVAL", amber
+			return "!", amber
 		case "waiting_for_input":
-			return "?", "QUESTION", amber
+			return "?", amber
 		case "unavailable":
-			return "◌", "UNKNOWN", muted
+			return "…", muted
 		case "accepted", "running":
 			// The TUI can see a prompt before the next app-server update.
 			if t.State != "blocked" && t.State != "waiting" {
-				return "●", "WORKING", blue
+				return "●", blue
 			}
 		}
 	}
 	switch t.State {
 	case "working":
-		return "●", "WORKING", blue
+		return "●", blue
 	case "waiting":
-		return "?", "QUESTION", amber
+		return "?", amber
 	case "blocked":
 		if t.Reason == "auth" {
-			return "!", "SIGN IN", red
+			return "@", red
 		}
 		if t.Reason == "permission" {
-			return "!", "APPROVAL", amber
+			return "!", amber
 		}
-		return "!", "BLOCKED", red
+		return "⊘", red
 	case "done":
-		return "✓", "DONE", accent
+		return "✓", accent
 	case "error":
-		return "!", "ERROR", red
+		return "×", red
 	case "idle":
-		return "○", "IDLE", muted
+		return "○", muted
 	case "starting":
-		return "◌", "STARTING", blue
+		return "◌", blue
 	case "unknown":
-		return "◌", "UNKNOWN", muted
+		return "…", muted
 	}
-	return " ", "", muted
+	return " ", muted
 }
-func terminalRow(t Terminal, active, indent, project string) row {
+func terminalRow(t Terminal, active, indent, name string) row {
 	marker := " "
 	if t.ID == active {
 		marker = "›"
 	}
-	icon, status, color := badge(t)
-	label := icon + " " + t.Program
-	if status != "" {
-		if project == "" {
-			label = icon + " Codex  " + status
-		} else {
-			label = icon + " " + status + "  " + project
-		}
+	icon, color := badge(t)
+	if icon != " " {
 		dir := filepath.Base(t.Checkout.Path)
 		if task := strings.TrimSuffix(t.Title, " | "+dir); task != "" && task != dir {
-			label += " · " + task
+			name += " · " + task
 		}
+	} else {
+		name = t.Program
 	}
-	return row{t.ID, t.Checkout.Path, t.ID, marker + indent + label, color}
+	return row{key: t.ID, path: t.Checkout.Path, id: t.ID, label: marker + indent + icon + " " + name, style: color}
 }
 
 func agentRows(s Snapshot) []row {
@@ -122,13 +120,14 @@ func agentRows(s Snapshot) []row {
 			continue
 		}
 		project := filepath.Base(t.Checkout.Repo)
-		if t.Checkout.Branch != "" {
-			project += "/" + t.Checkout.Branch
-		}
 		if counts[t.Checkout.Path] > 1 {
-			project = t.ID + " " + project
+			project += " " + t.ID
 		}
-		rows = append(rows, terminalRow(t, s.Active, " ", project))
+		r := terminalRow(t, s.Active, " ", project)
+		if t.Checkout.Branch != "" {
+			r.detail = "    " + t.Checkout.Branch
+		}
+		rows = append(rows, r)
 	}
 	return rows
 }
@@ -137,7 +136,7 @@ func autoSidebarWidth(s Snapshot, windowWidth int) int {
 	width := 28
 	if s.AgentMode {
 		for _, r := range agentRows(s) {
-			width = max(width, ansi.StringWidth(r.label)+1)
+			width = max(width, ansi.StringWidth(r.label)+1, ansi.StringWidth(r.detail)+1)
 		}
 	} else {
 		for _, c := range s.Checkouts {
@@ -161,18 +160,18 @@ func repositoryRows(s Snapshot) []row {
 			if c.Path == c.Repo && c.Branch != "" {
 				label += "  · " + c.Branch
 			}
-			rows = append(rows, row{"repo:" + c.Repo, c.Repo, "", label, title})
+			rows = append(rows, row{key: "repo:" + c.Repo, path: c.Repo, label: label, style: title})
 		}
 		indent := "  "
 		if c.Path != c.Repo {
-			rows = append(rows, row{"tree:" + c.Path, c.Path, "", "  └ " + c.Branch, accent})
+			rows = append(rows, row{key: "tree:" + c.Path, path: c.Path, label: "  └ " + c.Branch, style: accent})
 			indent = "    "
 		}
 		for _, t := range s.Terminals {
 			if t.State == "exited" || t.Checkout.Path != c.Path {
 				continue
 			}
-			rows = append(rows, terminalRow(t, s.Active, indent, ""))
+			rows = append(rows, terminalRow(t, s.Active, indent, "Codex"))
 		}
 	}
 	return rows
@@ -180,9 +179,9 @@ func repositoryRows(s Snapshot) []row {
 
 func (u *ui) rebuild() {
 	s := u.w.snapshot()
-	old := u.selected().key
-	if u.active != s.Active {
-		old = s.Active
+	target := u.selected().key
+	if u.active != s.Active || u.agentMode != s.AgentMode {
+		target = s.Active
 	}
 	u.active = s.Active
 	if u.agentMode != s.AgentMode {
@@ -196,7 +195,7 @@ func (u *ui) rebuild() {
 		u.rows = repositoryRows(s)
 	}
 	for i, r := range u.rows {
-		if r.key == old {
+		if r.key == target {
 			u.cursor = i
 			break
 		}
@@ -206,15 +205,42 @@ func (u *ui) rebuild() {
 	}
 	u.scroll()
 }
-func (u *ui) scroll() {
-	u.cursor = max(0, min(u.cursor, len(u.rows)-1))
-	count := max(1, u.height-7)
-	u.offset = max(0, min(u.offset, len(u.rows)-count))
-	if u.cursor < u.offset {
-		u.offset = u.cursor
+func (r row) height() int {
+	if r.detail != "" {
+		return 2
 	}
-	if u.cursor >= u.offset+count {
-		u.offset = u.cursor - count + 1
+	return 1
+}
+
+// Return the first entry that fits on a page ending at last.
+func (u *ui) pageStart(last int) int {
+	remaining := u.footerDividerY() - 3 - u.rows[last].height()
+	for last > 0 && remaining >= u.rows[last-1].height() {
+		last--
+		remaining -= u.rows[last].height()
+	}
+	return last
+}
+func (u *ui) scroll() {
+	if len(u.rows) == 0 {
+		u.cursor, u.offset = 0, 0
+		return
+	}
+	u.cursor = max(0, min(u.cursor, len(u.rows)-1))
+	u.offset = min(u.offset, u.cursor, u.pageStart(len(u.rows)-1))
+	u.offset = max(u.offset, u.pageStart(u.cursor))
+}
+
+// Rendering and mouse input use the same screen coordinates for each entry.
+func (u *ui) visibleRows() iter.Seq2[int, int] {
+	return func(yield func(index, y int) bool) {
+		y := 3
+		for i := u.offset; i < len(u.rows) && y < u.footerDividerY(); i++ {
+			if !yield(i, y) {
+				return
+			}
+			y += u.rows[i].height()
+		}
 	}
 }
 func (u *ui) selected() row {
@@ -304,15 +330,9 @@ func (u *ui) activate() {
 		}
 	}
 }
-func (u *ui) selectedKey() string {
-	if u.eventKey {
-		return u.w.eventKey
-	}
-	return u.w.key
-}
 func (u *ui) copyKey() {
 	// -w forwards OSC 52 to the attached client if its terminal allows clipboard writes.
-	_, err := u.w.p.tmInput(u.selectedKey(), "load-buffer", "-w", "-b", "kowloon-key", "-")
+	_, err := u.w.p.tmInput(u.w.key, "load-buffer", "-w", "-b", "kowloon-key", "-")
 	if err != nil {
 		u.report(err)
 		return
@@ -341,9 +361,6 @@ func (u *ui) key(k tea.KeyMsg) {
 		switch key {
 		case "b":
 			u.report(u.w.setAgentBell(!u.agentBell))
-		case "tab":
-			u.eventKey = !u.eventKey
-			u.reveal = false
 		case "r":
 			u.reveal = !u.reveal
 		case "c":
@@ -467,9 +484,6 @@ func (u *ui) mouse(m tea.MouseMsg) {
 			u.reveal = !u.reveal
 		case 4:
 			u.copyKey()
-		case 5:
-			u.eventKey = !u.eventKey
-			u.reveal = false
 		case u.height - 1:
 			u.mode = ""
 			u.reveal = false
@@ -493,19 +507,30 @@ func (u *ui) mouse(m tea.MouseMsg) {
 		u.newTerminal()
 		return
 	}
-	if m.Y == u.height-1 {
-		u.mode = "settings"
-		u.notice = ""
-		u.reveal = false
+	if m.Y >= u.footerDividerY() {
+		if m.Button == tea.MouseButtonLeft {
+			for s := range u.shortcuts() {
+				if m.Y == s.y && m.X >= s.x && m.X < s.x+2+len(s.label) {
+					u.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{s.key}})
+					break
+				}
+			}
+		}
 		return
 	}
-	i := u.offset + m.Y - 3
-	if m.Y >= 3 && m.Y < u.height-4 && i >= 0 && i < len(u.rows) {
-		u.cursor = i
-		if m.Button == tea.MouseButtonRight {
-			u.menu(u.rows[i])
-		} else {
-			u.activate()
+	if m.Y < 3 {
+		return
+	}
+	for i, y := range u.visibleRows() {
+		if m.Y >= y && m.Y < y+u.rows[i].height() {
+			u.cursor = i
+			u.scroll()
+			if m.Button == tea.MouseButtonRight {
+				u.menu(u.rows[i])
+			} else {
+				u.activate()
+			}
+			return
 		}
 	}
 }
@@ -531,6 +556,46 @@ func (u *ui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (u *ui) newButtonColumn() int {
 	return max(len(" KOWLOON")+1, u.width-len("+ New "))
 }
+
+type shortcut struct {
+	key   rune
+	label string
+	x, y  int
+}
+
+// Two columns fit when each has room for a key, a space, and "Settings".
+const twoColumnWidth = 22
+
+func (u *ui) footerDividerY() int {
+	rows := 3
+	if u.width < twoColumnWidth {
+		rows = 5
+	}
+	return max(4, u.height-rows-1)
+}
+
+func (u *ui) shortcuts() iter.Seq[shortcut] {
+	return func(yield func(shortcut) bool) {
+		toggle := "Agents"
+		if u.agentMode {
+			toggle = "Repos"
+		}
+		items := [...]shortcut{{key: 'n', label: "New"}, {key: 'm', label: "Actions"},
+			{key: 'a', label: toggle}, {key: 'w', label: "Worktree"}, {key: 's', label: "Settings"}}
+		top := u.footerDividerY() + 1
+		for i, s := range items {
+			s.x, s.y = 1, top+i
+			if u.width >= twoColumnWidth {
+				s.x += (i % 2) * min(14, u.width/2)
+				s.y = top + i/2
+			}
+			if s.y >= u.height || !yield(s) {
+				return
+			}
+		}
+	}
+}
+
 func (u *ui) View() string {
 	if u.height < 1 || u.width < 1 {
 		return ""
@@ -543,8 +608,7 @@ func (u *ui) View() string {
 	}
 	put(0, " KOWLOON"+strings.Repeat(" ", u.newButtonColumn()-len(" KOWLOON"))+"+ New ", headerColor)
 	put(1, strings.Repeat("─", u.width), muted)
-	footer := " s  Settings"
-	put(u.height-1, footer, muted)
+	noticeY := u.height - 2
 	switch u.mode {
 	case "settings":
 		put(0, " Settings", title)
@@ -553,21 +617,16 @@ func (u *ui) View() string {
 			bell = "On"
 		}
 		put(1, " [b] Agent bell: "+bell, title)
-		label := " MCP control key"
-		if u.eventKey {
-			label = " MCP events-only key"
-		}
-		put(2, label, accent)
-		put(5, " [Tab] Switch key", title)
+		put(2, " MCP key", accent)
 		show := "Reveal key"
 		if u.reveal {
 			show = "Hide key"
 		}
 		put(3, " [r] "+show, title)
 		put(4, " [c] Copy key", title)
-		y := 6
+		y := 5
 		if u.reveal {
-			for _, part := range chunks(u.selectedKey(), max(1, u.width-2)) {
+			for _, part := range chunks(u.w.key, max(1, u.width-2)) {
 				put(y, " "+part, title)
 				y++
 			}
@@ -610,30 +669,36 @@ func (u *ui) View() string {
 		put(5, " [n] Cancel", muted)
 		put(u.height-1, " Esc  Back", muted)
 	default:
-		heading, toggle := " REPOSITORIES", "a Agents"
+		heading := " REPOSITORIES"
 		if u.agentMode {
-			heading, toggle = " AGENTS", "a Repos"
+			heading = " AGENTS"
 			if len(u.rows) == 0 {
 				put(3, " No agents running", muted)
 			}
 		}
 		put(2, heading, muted)
-		for i, r := range u.rows {
-			y := 3 + i - u.offset
-			if y < 3 || y >= u.height-4 {
-				continue
-			}
-			style := r.style
+		for i, y := range u.visibleRows() {
+			r := u.rows[i]
+			background := ""
 			if i == u.cursor {
-				style += "\x1b[48;5;237m"
+				background = "\x1b[48;5;237m"
 			}
-			put(y, r.label, style)
+			put(y, r.label, r.style+background)
+			if r.detail != "" && y+1 < u.footerDividerY() {
+				put(y+1, r.detail, muted+background)
+			}
 		}
-		put(u.height-3, " n New   m Actions", muted)
-		put(u.height-2, " "+toggle+"   w Worktree", muted)
+		noticeY = u.footerDividerY()
+		put(noticeY, " "+strings.Repeat("─", max(0, u.width-2)), divider)
+		for s := range u.shortcuts() {
+			line := lines[s.y]
+			gap := strings.Repeat(" ", s.x-ansi.StringWidth(line))
+			line += gap + title + string(s.key) + reset + " " + muted + s.label + reset
+			lines[s.y] = ansi.Truncate(line, u.width, "…")
+		}
 	}
 	if u.notice != "" {
-		put(u.height-2, " "+u.notice, amber)
+		put(noticeY, " "+u.notice, amber)
 	}
 	return strings.Join(lines, "\n")
 }

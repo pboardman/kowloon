@@ -38,9 +38,13 @@ type Snapshot struct {
 	Endpoint  string     `json:"mcp_endpoint"`
 }
 type tracked struct {
-	term    Terminal
-	history []Status
-	agent   *codexAgent
+	term               Terminal
+	history            []Status
+	agent              *codexAgent
+	notices            []conversationNotice
+	noticeRevision     uint64
+	missedNotices      bool
+	conversationListed bool
 }
 type gitCache struct {
 	value Checkout
@@ -59,13 +63,13 @@ type workspace struct {
 	runs                                 map[string]run
 	pastRuns                             []string
 	cache                                map[string]gitCache
-	eventKey                             string
-	events                               eventLog
+	conversationWaiters                  int
+	questions                            map[string]pendingQuestion
 	changed                              chan struct{}
 }
 
 func newWorkspace(p runtimePaths, side string) *workspace {
-	return &workspace{runs: map[string]run{}, agentBell: true, events: eventLog{instance: randomID(16), waiters: make(chan struct{}, 32)}, p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
+	return &workspace{runs: map[string]run{}, agentBell: true, p: p, sidebar: side, terms: map[string]*tracked{}, cache: map[string]gitCache{}, changed: make(chan struct{})}
 }
 
 // The workspace lock serializes pane swaps, paste buffers and Git mutations.
@@ -75,8 +79,17 @@ func (w *workspace) status(t *tracked, state, reason string) bool {
 		return false
 	}
 	s := Status{state, reason, t.term.Revision + 1}
+	hadAgent := t.term.hasAgent()
 	t.term.Status = s
-	w.events.append(queueEvent{Type: "terminal." + state, Subject: t.term.ID, Revision: s.Revision, Reason: reason})
+	if !hadAgent && t.term.hasAgent() {
+		t.notices = nil
+		t.missedNotices = false
+		t.conversationListed = false
+	}
+	ended := hadAgent && !t.term.hasAgent()
+	if ended || ((t.agent == nil || t.agent.active == "" || reason == "auth") && (statusEvent{State: state}).needsAttention()) {
+		t.recordNotice(conversationNotice{Type: "terminal." + state, Subject: t.term.ID, Revision: s.Revision, Reason: reason})
+	}
 	t.history = append(t.history, s)
 	if len(t.history) > 64 {
 		t.history = slices.Clone(t.history[len(t.history)-64:])

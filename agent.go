@@ -69,6 +69,8 @@ type runWaitResult struct {
 	Matched bool `json:"matched"`
 }
 
+const maxPastRuns = 512
+
 var attentionStates = []string{"finished", "failed", "interrupted", "waiting_for_approval", "waiting_for_input", "unavailable"}
 
 func (w *workspace) agent(id string) (*codexAgent, error) {
@@ -218,7 +220,6 @@ func (w *workspace) submitPrompt(ctx context.Context, in promptArgs) (run, error
 	w.mu.Lock()
 	a.active = r.ID
 	w.runs[r.ID] = r
-	w.events.append(queueEvent{Type: "run.accepted", Subject: r.ID, Revision: 1})
 	w.notify()
 	w.saveLocked()
 	w.mu.Unlock()
@@ -238,7 +239,9 @@ func (w *workspace) recordRun(a *codexAgent, r run, state string, final bool) {
 		old.Status = state
 		old.Revision++
 		w.runs[r.ID] = old
-		w.events.append(queueEvent{Type: "run." + state, Subject: r.ID, Revision: old.Revision})
+		if t := w.terms[r.Terminal]; t != nil && slices.Contains(attentionStates, state) {
+			t.recordNotice(conversationNotice{Type: "run." + state, Subject: r.ID, Revision: old.Revision})
+		}
 		w.notify()
 	}
 	if final {
@@ -246,7 +249,7 @@ func (w *workspace) recordRun(a *codexAgent, r run, state string, final bool) {
 			a.active = ""
 		}
 		w.pastRuns = append(w.pastRuns, r.ID)
-		if len(w.pastRuns) > eventCapacity {
+		if len(w.pastRuns) > maxPastRuns {
 			delete(w.runs, w.pastRuns[0])
 			w.pastRuns = w.pastRuns[1:]
 		}
@@ -257,6 +260,7 @@ func (w *workspace) recordRun(a *codexAgent, r run, state string, final bool) {
 }
 func (w *workspace) monitorRun(a *codexAgent, r run) {
 	var c *codexRPC
+	defer w.forgetQuestions(r.ID, "")
 	defer func() {
 		if c != nil {
 			c.conn.Close()
@@ -274,6 +278,14 @@ func (w *workspace) monitorRun(a *codexAgent, r run) {
 		if err == nil {
 			state, err = c.runState(ctx, r.Thread, r.ID)
 		}
+		if err == nil && c.onMessage == nil && (state == "running" || state == "waiting_for_input" || state == "waiting_for_approval") {
+			c.onMessage = func(msg rpcMessage) { w.observeQuestion(r, msg) }
+			// Older servers can still track runs when they do not support rejoining.
+			var fault *rpcFault
+			if joinErr := c.rejoin(ctx, r.Thread); joinErr != nil && !errors.As(joinErr, &fault) {
+				err = joinErr
+			}
+		}
 		cancel()
 		if err == nil {
 			misses = 0
@@ -290,6 +302,7 @@ func (w *workspace) monitorRun(a *codexAgent, r run) {
 			if c != nil {
 				c.conn.Close()
 				c = nil
+				w.forgetQuestions(r.ID, "")
 			}
 			misses++
 			if misses >= 3 {
@@ -366,4 +379,6 @@ func (w *workspace) registerAgentTools(s *mcp.Server) {
 	registerCtx(s, "submit_prompt", "Submit text to a ready Codex terminal in Kowloon and return the run ID that Codex accepted.", w.submitPrompt)
 	register(s, "get_run", "Read the status of one Codex run submitted through Kowloon.", func(in runArgs) (run, error) { w.mu.Lock(); defer w.mu.Unlock(); return w.getRun(in.RunID) })
 	registerCtx(s, "wait_for_run", "Wait for a status on one Codex run submitted through Kowloon. A terminal idle event cannot finish a run.", w.waitRun)
+	register(s, "list_questions", "Read pending Codex questions and choices for runs submitted through Kowloon. Filter by run_id from submit_prompt or a question.opened event.", w.listQuestions)
+	registerCtx(s, "answer_question", "Send the user's answers to one pending Kowloon Codex question request. Pass its exact request_id and answers keyed by question ID.", w.answerQuestion)
 }

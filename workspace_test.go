@@ -14,6 +14,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Exercise the exact same subprocess entry points as the installed binary.
@@ -178,7 +179,7 @@ func TestRepositoryTerminalAlignment(t *testing.T) {
 			labels = append(labels, r.label)
 		}
 	}
-	want := []string{"     bash", "›  ● Codex  WORKING · Review tests", "       fish", "     ! Codex  APPROVAL"}
+	want := []string{"     bash", "›  ● Codex · Review tests", "       fish", "     ! Codex"}
 	if !slices.Equal(labels, want) {
 		t.Fatalf("rendered terminal rows:\n%s", strings.Join(labels, "\n"))
 	}
@@ -203,26 +204,116 @@ func TestAgentModeRows(t *testing.T) {
 	}
 	for i, r := range u.rows {
 		term := w.terms[r.id].term
-		icon, status, _ := badge(term)
-		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(r.label, icon+" "+status) {
+		icon, _ := badge(term)
+		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(r.label, icon+" kowloon") || strings.TrimSpace(r.detail) != term.Checkout.Branch {
 			t.Fatalf("agent row: %+v", r)
 		}
-		if term.Checkout.Path == repo.Path && !strings.Contains(r.label, r.id+" kowloon/main") {
+		if term.Checkout.Path == repo.Path && !strings.Contains(r.label, "kowloon "+r.id) {
 			t.Fatalf("shared checkout missing terminal ID: %+v", r)
 		}
 	}
-	if !strings.Contains(u.selected().label, "kowloon/feat/queue · Review tests") {
+	if !strings.Contains(u.selected().label, "kowloon · Review tests") {
 		t.Fatal(u.selected())
 	}
 	w.terms["%2"].term.State = "shell"
 	w.terms[w.active].term.State = "done"
 	u.rebuild()
-	if u.selected().id != w.active || !strings.Contains(u.selected().label, "DONE") || u.rows[0].id == "%2" {
+	if u.selected().id != w.active || !strings.Contains(u.selected().label, "✓ kowloon") || u.rows[0].id == "%2" {
 		t.Fatal(u.rows)
 	}
 	u.key(toggle)
 	if u.agentMode || u.selected().id != w.active || u.rows[0].id != "" {
 		t.Fatal(u.rows)
+	}
+}
+
+func TestModeSwitchHighlightsOpenTerminal(t *testing.T) {
+	for _, state := range []string{"idle", "shell"} {
+		t.Run(state, func(t *testing.T) {
+			w := newWorkspace(runtimePaths{}, "%0")
+			for i, name := range []string{"kowloon", "speedengine"} {
+				id := fmt.Sprintf("%%%d", i+1)
+				path := "/src/" + name
+				w.terms[id] = &tracked{term: Terminal{ID: id, Checkout: Checkout{Repo: path, Path: path}, Status: Status{State: "idle"}}}
+			}
+			w.active = "%2"
+			w.terms[w.active].term.State = state
+			u := newUI(w)
+			toggle := tea.KeyMsg{Type: tea.KeyF12}
+			u.key(toggle)
+			u.key(tea.KeyMsg{Type: tea.KeyUp})
+			u.rebuild() // A normal refresh must preserve keyboard browsing.
+			if u.selected().id != "%1" {
+				t.Fatal("lost browsing position", u.selected())
+			}
+			u.key(toggle)
+			if w.active != "%2" || u.selected().id != w.active {
+				t.Fatalf("open %s, highlighted %+v", w.active, u.selected())
+			}
+			if state == "idle" {
+				u.key(tea.KeyMsg{Type: tea.KeyUp})
+				u.key(tea.KeyMsg{Type: tea.KeyUp})
+				if u.selected().id != "%1" {
+					t.Fatal("expected inactive terminal", u.selected())
+				}
+				w.setAgentMode(true) // MCP changes the mode before the next UI refresh.
+				u.rebuild()
+				if u.selected().id != w.active {
+					t.Fatal("agent view highlighted", u.selected())
+				}
+			}
+		})
+	}
+}
+
+func TestAgentBranchSelectionAfterScroll(t *testing.T) {
+	u := &ui{height: 10, width: 28, agentMode: true, rows: []row{
+		{id: "%1", path: "/one", label: "one", detail: "    main"},
+		{id: "%2", path: "/two", label: "two"},
+		{id: "%3", path: "/three", label: "three", detail: "    topic"},
+	}}
+	u.key(tea.KeyMsg{Type: tea.KeyDown})
+	u.key(tea.KeyMsg{Type: tea.KeyDown})
+	lines := strings.Split(u.View(), "\n")
+	if u.offset != 1 || !strings.Contains(lines[3], "two") || !strings.Contains(lines[4], "three") || !strings.Contains(lines[5], "topic") {
+		t.Fatal(lines)
+	}
+	for _, y := range []int{4, 5} {
+		u.mode = ""
+		u.cursor = 1
+		u.mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonRight, Y: y})
+		if u.mode != "menu" || u.id != "%3" || u.selected().id != "%3" {
+			t.Fatalf("line %d selected %q", y, u.id)
+		}
+	}
+}
+
+func TestSidebarShortcuts(t *testing.T) {
+	for _, tc := range []struct {
+		width int
+		want  []string
+	}{
+		{28, []string{" n New         m Actions", " a Agents      w Worktree", " s Settings"}},
+		{22, []string{" n New      m Actions", " a Agents   w Worktree", " s Settings"}},
+		{12, []string{" n New", " m Actions", " a Agents", " w Worktree", " s Settings"}},
+	} {
+		u := newUI(newWorkspace(runtimePaths{}, "%0"))
+		u.width = tc.width
+		u.notice = "Saved"
+		lines := strings.Split(ansi.Strip(u.View()), "\n")
+		top := len(lines) - len(tc.want)
+		if lines[top-1] != " Saved" || !slices.Equal(lines[top:], tc.want) {
+			t.Fatalf("width %d: %q", u.width, lines[top-1:])
+		}
+		for i, line := range tc.want {
+			if x := strings.Index(line, "Agents"); x >= 0 {
+				u.mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: top + i})
+				got := strings.Split(ansi.Strip(u.View()), "\n")[top+i]
+				if !u.agentMode || strings.Index(got, "Repos") != x || strings.Index(got, "Worktree") != strings.Index(line, "Worktree") {
+					t.Fatalf("width %d after toggle: %q", u.width, got)
+				}
+			}
+		}
 	}
 }
 
@@ -432,7 +523,7 @@ func TestLiveWorkspace(t *testing.T) {
 		tool("set_agent_mode", enabledArgs{Enabled: true}, nil)
 		eventually(func() bool {
 			view, _ := p.tm("capture-pane", "-p", "-t", side)
-			return strings.Contains(view, " AGENTS") && strings.Contains(view, "a repository/main") && !strings.Contains(view, "▾")
+			return strings.Contains(view, " AGENTS") && strings.Contains(view, "a repository\n    main") && !strings.Contains(view, "▾")
 		})
 		testManagedRun(t, tool, agent, releaseModel)
 		tool("close_terminal", termArgs{agent.ID}, nil)

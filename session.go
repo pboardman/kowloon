@@ -305,7 +305,7 @@ func (w *workspace) restoreRuns(s savedSession, ids map[string]string, live bool
 		w.runs[id] = r
 		w.pastRuns = append(w.pastRuns, id)
 	}
-	for len(w.pastRuns) > eventCapacity {
+	for len(w.pastRuns) > maxPastRuns {
 		delete(w.runs, w.pastRuns[0])
 		w.pastRuns = w.pastRuns[1:]
 	}

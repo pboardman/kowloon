@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -136,6 +135,10 @@ func (w *workspace) handler() http.Handler {
 	w.registerAgentTools(s)
 	register(s, "save_session", "Save the current Kowloon workspace for the next start.", func(noArgs) (ack, error) { return done(w.refresh()) })
 	register(s, "list_workspace", "List Kowloon repositories, worktrees, terminals, branches, sidebar width and live agent states.", func(noArgs) (Snapshot, error) { return w.snapshot(), nil })
+	register(s, "list_conversations", "List live Kowloon agent conversations, their current state and any pending questions. Pass a conversation_id to wait_for_next_event.", func(noArgs) (conversationList, error) { return w.listConversations(), nil })
+	registerCtx(s, "wait_for_next_event", "Wait for the next question, blocker, outcome, or exit in one listed Kowloon conversation. A structured question includes its choices and request_id for answer_question. On timeout, call again with the same conversation_id.", func(ctx context.Context, a conversationArgs) (conversationEvent, error) {
+		return w.nextConversationEvent(ctx, a.ID, 30*time.Second)
+	})
 	register(s, "open_repo", "Open a Kowloon shell at the root of a Git checkout.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, false, true) })
 	register(s, "new_terminal", "Open a Kowloon shell in a directory.", func(a pathArgs) (Terminal, error) { return w.open(a.Path, false, false) })
 	register(s, "create_worktree", "Create a named Git worktree and open its terminal. Reuse a matching Kowloon worktree.", func(a treeArgs) (Terminal, error) { return w.addTree(a.Path, a.Branch) })
@@ -154,30 +157,7 @@ func (w *workspace) handler() http.Handler {
 		out, err := w.wait(ctx, a)
 		return nil, out, err
 	})
-	events := mcp.NewServer(&mcp.Implementation{Name: "kowloon-events", Version: "0.1.0"}, nil)
-	makeHandler := func(server *mcp.Server) http.Handler {
-		server.AddResourceTemplate(&mcp.ResourceTemplate{Name: "Event queue", URITemplate: "queue://events/{cursor}", MIMEType: "application/json"}, func(ctx context.Context, r *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-			cursor := strings.TrimPrefix(r.Params.URI, "queue://events/")
-			if cursor == "head" {
-				cursor = ""
-			}
-			page, err := w.readEvents(ctx, eventArgs{Cursor: cursor})
-			if err != nil {
-				return nil, err
-			}
-			data, err := json.Marshal(page)
-			if err != nil {
-				return nil, err
-			}
-			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: r.Params.URI, MIMEType: "application/json", Text: string(data)}}}, nil
-		})
-		mcp.AddTool(server, &mcp.Tool{Name: "read_events", Description: "Read a batch of Kowloon status events. Each reader keeps its own cursor.", Meta: mcp.Meta{"io.github.kowloon/event-queue": "v1"}, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a eventArgs) (*mcp.CallToolResult, eventPage, error) {
-			page, err := w.readEvents(ctx, a)
-			return nil, page, err
-		})
-		return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	}
-	controlHandler, eventHandler := makeHandler(s), makeHandler(events)
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mcp" {
 			http.NotFound(rw, r)
@@ -188,15 +168,7 @@ func (w *workspace) handler() http.Handler {
 			return
 		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		var handler http.Handler
-		switch {
-		case !ok || token == "":
-		case subtle.ConstantTimeCompare([]byte(token), []byte(w.key)) == 1:
-			handler = controlHandler
-		case subtle.ConstantTimeCompare([]byte(token), []byte(w.eventKey)) == 1:
-			handler = eventHandler
-		}
-		if handler == nil {
+		if !ok || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(w.key)) != 1 {
 			rw.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(rw, "MCP key required", http.StatusUnauthorized)
 			return

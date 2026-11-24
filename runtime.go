@@ -105,11 +105,7 @@ func (p runtimePaths) loadAgentBell() (bool, error) {
 }
 
 func secret(p runtimePaths) (string, error) {
-	return privateKey(p, "mcp.key")
-}
-
-func privateKey(p runtimePaths, name string) (string, error) {
-	path := filepath.Join(p.config, name)
+	path := filepath.Join(p.config, "mcp.key")
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		// Separate login sessions can share this key. Only the first publisher wins.
 		if err := publishPrivate(path, []byte(randomID(32)), os.Link); err != nil && !errors.Is(err, os.ErrExist) {

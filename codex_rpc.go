@@ -15,8 +15,17 @@ import (
 
 // The stock Codex TUI and this client share one private app server per managed pane.
 type codexRPC struct {
-	conn *websocket.Conn
-	seq  int
+	conn      *websocket.Conn
+	seq       int
+	onMessage func(rpcMessage)
+}
+
+type rpcMessage struct {
+	ID     json.RawMessage
+	Method string
+	Params json.RawMessage
+	Result json.RawMessage
+	Error  *rpcFault
 }
 
 func dialCodex(ctx context.Context, dir string) (*codexRPC, error) {
@@ -60,16 +69,13 @@ func (c *codexRPC) call(ctx context.Context, method string, params, out any) err
 		return err
 	}
 	for {
-		var msg struct {
-			ID     json.RawMessage
-			Method string
-			Result json.RawMessage
-			Error  *rpcFault
-		}
+		var msg rpcMessage
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			return err
 		}
-		// The interactive client owns approvals. This connection never answers server requests.
+		if msg.Method != "" && c.onMessage != nil {
+			c.onMessage(msg)
+		}
 		if msg.Method != "" || string(msg.ID) != fmt.Sprint(c.seq) {
 			continue
 		}
@@ -81,6 +87,10 @@ func (c *codexRPC) call(ctx context.Context, method string, params, out any) err
 		}
 		return json.Unmarshal(msg.Result, out)
 	}
+}
+
+func (c *codexRPC) rejoin(ctx context.Context, thread string) error {
+	return c.call(ctx, "thread/resume", map[string]any{"threadId": thread, "excludeTurns": true}, nil)
 }
 
 type codexTurn struct{ ID, Status string }

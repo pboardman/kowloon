@@ -138,8 +138,9 @@ func randomID(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func command(input io.Reader, name string, args ...string) (string, error) {
+func command(dir string, input io.Reader, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
 	cmd.Stdin = input
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -151,13 +152,28 @@ func command(input io.Reader, name string, args ...string) (string, error) {
 }
 
 func (p runtimePaths) tmArgs(args ...string) []string {
-	return append([]string{"-S", filepath.Join(p.dir, "tmux"), "-f", filepath.Join(p.dir, "tmux.conf")}, args...)
+	argv := []string{"-S", filepath.Join(p.dir, "tmux"), "-f", filepath.Join(p.dir, "tmux.conf")}
+	for _, arg := range args {
+		// Kowloon issues one command. tmux treats a trailing semicolon in an
+		// argument as a command separator unless it has a preceding backslash.
+		if prefix, ok := strings.CutSuffix(arg, ";"); ok {
+			arg = prefix + `\;`
+		}
+		argv = append(argv, arg)
+	}
+	return argv
 }
 func (p runtimePaths) tm(args ...string) (string, error) {
-	return command(nil, "tmux", p.tmArgs(args...)...)
+	return p.tmInDir("", args...)
+}
+
+// tmux inherits the command client's working directory. Its -c flag instead
+// evaluates a tmux format, so keep directory names out of that flag.
+func (p runtimePaths) tmInDir(dir string, args ...string) (string, error) {
+	return command(dir, nil, "tmux", p.tmArgs(args...)...)
 }
 func (p runtimePaths) tmInput(input string, args ...string) (string, error) {
-	return command(strings.NewReader(input), "tmux", p.tmArgs(args...)...)
+	return command("", strings.NewReader(input), "tmux", p.tmArgs(args...)...)
 }
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 

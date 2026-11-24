@@ -189,7 +189,7 @@ func start(p runtimePaths, path string, restart, fresh bool) error {
 			if _, err = p.tm("set-option", "-t", "kowloon", "@ready", "0"); err != nil {
 				return err
 			}
-			if _, err = p.tm("respawn-pane", "-k", "-t", "kowloon:workspace.0", "-c", p.dir, p.exe, "_sidebar", "", "live", addr.String()); err != nil {
+			if _, err = p.tmInDir(p.dir, "respawn-pane", "-k", "-t", "kowloon:workspace.0", "-c", ".", p.exe, "_sidebar", "", "live", addr.String()); err != nil {
 				return err
 			}
 		}
@@ -199,10 +199,7 @@ func start(p runtimePaths, path string, restart, fresh bool) error {
 			width, height = 120, 40
 		}
 		args := []string{"new-session", "-d", "-x", strconv.Itoa(width), "-y", strconv.Itoa(height), "-s", "kowloon", "-n", "workspace"}
-		if path != "" {
-			args = append(args, "-c", path)
-		}
-		_, err = p.tm(append(args, p.exe, "_sidebar", path, mode, addr.String())...)
+		_, err = p.tmInDir(path, append(args, p.exe, "_sidebar", path, mode, addr.String())...)
 		if err != nil {
 			return err
 		}

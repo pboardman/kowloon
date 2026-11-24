@@ -324,7 +324,7 @@ func TestLiveWorkspace(t *testing.T) {
 		t.Skip("set KOWLOON_INTEGRATION=1 for a real tmux server")
 	}
 	// Use a short socket path. Everything, including the tmux session, belongs to this test.
-	base, err := os.MkdirTemp("", "kw.live-")
+	base, err := os.MkdirTemp("", "kw.#{pane_id}-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,4 +675,38 @@ func TestLiveWorkspace(t *testing.T) {
 	}
 
 	testSessionRecovery(t, p, repo, tool)
+
+	// Check the real directories in tmux, independently of Kowloon's metadata.
+	if err := dispatch([]string{"--stop"}); err != nil {
+		t.Fatal(err)
+	}
+	literal := filepath.Join(base, "checkout #{session_name} ## '100%' ;")
+	if err := os.Mkdir(literal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"--detach", "--no-restore", literal}); err != nil {
+		t.Fatal(err)
+	}
+	checkDirectory := func(target, format, want string) {
+		t.Helper()
+		got, err := p.tm("display-message", "-p", "-t", target, format)
+		if err != nil || got != want {
+			t.Fatalf("%s %s: got %q, want %q: %v", target, format, got, want, err)
+		}
+	}
+	checkDirectory("kowloon:workspace.0", "#{session_path}", literal)
+	tool("list_workspace", noArgs{}, &s)
+	checkDirectory(s.Active, "#{pane_current_path}", literal)
+	if err := dispatch([]string{"--restart"}); err != nil {
+		t.Fatal(err)
+	}
+	checkDirectory("kowloon:workspace.0", "#{pane_current_path}", p.dir)
+	if err := dispatch([]string{"--stop"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"--detach"}); err != nil {
+		t.Fatal(err)
+	}
+	tool("list_workspace", noArgs{}, &s)
+	checkDirectory(s.Active, "#{pane_current_path}", literal)
 }

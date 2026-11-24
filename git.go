@@ -15,7 +15,7 @@ type Checkout struct {
 }
 
 func git(path string, args ...string) (string, error) {
-	return command(nil, "git", append([]string{"-C", path}, args...)...)
+	return command("", nil, "git", append([]string{"-C", path}, args...)...)
 }
 
 func checkout(path string) (Checkout, error) {

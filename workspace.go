@@ -328,7 +328,7 @@ func (w *workspace) spawnTerminal(path string, codex bool, thread string, picker
 	c := w.resolve(path)
 	// Install the status reader before releasing the process to write its first byte.
 	gate := "start-" + randomID(10)
-	args := []string{"new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "kowloon:", "-c", path, w.p.exe, "_run", gate}
+	args := []string{"new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "kowloon:", w.p.exe, "_run", gate}
 	var agent *codexAgent
 	if codex {
 		dir, err := os.MkdirTemp(w.p.dir, "a-")
@@ -344,7 +344,7 @@ func (w *workspace) spawnTerminal(path string, codex bool, thread string, picker
 			args = append(args, "resume")
 		}
 	}
-	id, err := w.p.tm(args...)
+	id, err := w.p.tmInDir(path, args...)
 	if err != nil {
 		if agent != nil {
 			agent.close()

@@ -40,6 +40,7 @@ type Snapshot struct {
 type tracked struct {
 	term               Terminal
 	history            []Status
+	claudePane         bool
 	agent              *codexAgent
 	notices            []conversationNotice
 	noticeRevision     uint64
@@ -106,6 +107,16 @@ func (w *workspace) applyEvent(e statusEvent) bool {
 		return false
 	}
 	if t := w.terms[e.Pane]; t != nil && t.term.State != "exited" {
+		// A nested program cannot relabel the agent that owns this pane.
+		if e.Program != "" {
+			if e.Program != "claude" && e.Program != "codex" {
+				return false
+			}
+			if (t.agent != nil || t.claudePane) && e.Program != t.term.Program {
+				return false
+			}
+			t.term.Program = e.Program
+		}
 		changed := w.status(t, e.State, e.Reason)
 		if changed {
 			w.saveLocked()
@@ -166,16 +177,22 @@ func (w *workspace) refresh() error {
 			t.term.CWD = f[6]
 			t.term.Checkout = w.resolve(f[6])
 		}
-		if t.agent == nil {
-			t.term.Program = f[4]
-		}
 		t.term.Title = clean(f[5])
-		// A killed process cannot send its final clear record.
-		if t.term.State != "shell" && t.agent == nil && isShell(f[4]) {
-			w.status(t, "shell", "")
-		}
-		if t.term.State == "shell" && f[4] == "codex" {
-			w.status(t, "unknown", "")
+		if t.agent == nil && !t.claudePane {
+			command := f[4]
+			switch {
+			case isShell(command):
+				// A killed process cannot send its final clear record.
+				t.term.Program = command
+				w.status(t, "shell", "")
+			case command == "claude" || command == "codex":
+				t.term.Program = command
+				if t.term.State == "shell" {
+					w.status(t, "unknown", "")
+				}
+			case !t.term.hasAgent():
+				t.term.Program = command
+			}
 		}
 	}
 	if active := w.terms[w.active]; active != nil && active.term.State == "exited" {
@@ -294,7 +311,16 @@ func (w *workspace) selectLocked(id string, focus bool) error {
 	}
 	return nil
 }
-func (w *workspace) open(path string, codex, repo bool) (Terminal, error) {
+
+type launchProgram string
+
+const (
+	launchShell  launchProgram = ""
+	launchCodex  launchProgram = "codex"
+	launchClaude launchProgram = "claude"
+)
+
+func (w *workspace) open(path string, program launchProgram, repo bool) (Terminal, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	path, err := directory(path)
@@ -308,17 +334,19 @@ func (w *workspace) open(path string, codex, repo bool) (Terminal, error) {
 		}
 		path = c.Path
 	}
-	return w.spawn(path, codex)
+	return w.spawn(path, program)
 }
-func (w *workspace) spawn(path string, codex bool) (Terminal, error) {
-	return w.spawnTerminal(path, codex, "", false)
+func (w *workspace) spawn(path string, program launchProgram) (Terminal, error) {
+	return w.spawnTerminal(path, program, "", false)
 }
-func (w *workspace) spawnTerminal(path string, codex bool, thread string, picker bool) (Terminal, error) {
+func (w *workspace) spawnTerminal(path string, program launchProgram, thread string, picker bool) (Terminal, error) {
 	prog := os.Getenv("SHELL")
 	if prog == "" {
 		prog = "/bin/sh"
 	}
-	if codex || picker {
+	if program != launchShell {
+		prog = string(program)
+	} else if picker {
 		prog = "codex"
 	}
 	exe, err := exec.LookPath(prog)
@@ -330,7 +358,7 @@ func (w *workspace) spawnTerminal(path string, codex bool, thread string, picker
 	gate := "start-" + randomID(10)
 	args := []string{"new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "kowloon:", w.p.exe, "_run", gate}
 	var agent *codexAgent
-	if codex {
+	if program == launchCodex {
 		dir, err := os.MkdirTemp(w.p.dir, "a-")
 		if err != nil {
 			return Terminal{}, err
@@ -340,7 +368,16 @@ func (w *workspace) spawnTerminal(path string, codex bool, thread string, picker
 		args = append(args, w.p.exe, "_codex", dir, exe, c.Path, thread)
 	} else {
 		args = append(args, exe)
-		if picker {
+		if program == launchClaude {
+			settings, err := claudeSettings(w.p.exe)
+			if err != nil {
+				return Terminal{}, err
+			}
+			args = append(args, "--settings", settings)
+			if picker {
+				args = append(args, "--resume")
+			}
+		} else if picker {
 			args = append(args, "resume")
 		}
 	}
@@ -368,10 +405,10 @@ func (w *workspace) spawnTerminal(path string, codex bool, thread string, picker
 	if err != nil {
 		return Terminal{}, err
 	}
-	t := &tracked{term: Terminal{ID: id, CWD: path, Checkout: c, Program: filepath.Base(exe)}, agent: agent}
+	t := &tracked{term: Terminal{ID: id, CWD: path, Checkout: c, Program: filepath.Base(exe)}, agent: agent, claudePane: program == launchClaude}
 	w.terms[id] = t
 	s := "shell"
-	if codex {
+	if program != launchShell {
 		s = "starting"
 	}
 	if _, err = w.p.tm("wait-for", "-S", gate); err != nil {
@@ -391,7 +428,7 @@ func (w *workspace) addTree(path, branch string) (Terminal, error) {
 	if err != nil {
 		return Terminal{}, err
 	}
-	return w.spawn(c.Path, false)
+	return w.spawn(c.Path, launchShell)
 }
 func (w *workspace) selectTerm(id string) error {
 	w.mu.Lock()

@@ -34,7 +34,7 @@ func TestStatusFragments(t *testing.T) {
 		var p statusParser
 		var got []string
 		for i := 0; i < len(stream); i += size {
-			p.feed([]byte(stream[i:min(i+size, len(stream))]), func(s, k string) { got = append(got, s+"/"+k) })
+			p.feed([]byte(stream[i:min(i+size, len(stream))]), func(e statusEvent) { got = append(got, e.State+"/"+e.Reason) })
 		}
 		if !slices.Equal(got, []string{"working/", "waiting/question", "blocked/permission", "shell/"}) {
 			t.Fatalf("chunk %d: %v", size, got)
@@ -66,7 +66,7 @@ func TestUnbornWorktree(t *testing.T) {
 func TestStateHistory(t *testing.T) {
 	w := &workspace{terms: map[string]*tracked{"%1": {}}, changed: make(chan struct{})}
 	for _, s := range []string{"working", "waiting", "working", "done"} {
-		w.applyEvent(statusEvent{"%1", s, ""})
+		w.applyEvent(statusEvent{Pane: "%1", State: s, Reason: ""})
 	}
 	rev := uint64(1)
 	result, err := w.wait(context.Background(), waitArgs{ID: "%1", States: []string{"waiting"}, After: &rev})
@@ -93,12 +93,12 @@ func TestBellSetting(t *testing.T) {
 	check(true, "Agent bell: On")
 	u.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	check(false, "Agent bell: Off")
-	if w.applyEvent(statusEvent{"%1", "blocked", "permission"}) || w.snapshot().Terminals[0].State != "blocked" {
+	if w.applyEvent(statusEvent{Pane: "%1", State: "blocked", Reason: "permission"}) || w.snapshot().Terminals[0].State != "blocked" {
 		t.Fatal("muting the bell must still record the blocked transition")
 	}
 	u.mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: 1})
 	check(true, "Agent bell: On")
-	if w.applyEvent(statusEvent{"%1", "blocked", "permission"}) || !w.applyEvent(statusEvent{"%1", "done", ""}) {
+	if w.applyEvent(statusEvent{Pane: "%1", State: "blocked", Reason: "permission"}) || !w.applyEvent(statusEvent{Pane: "%1", State: "done", Reason: ""}) {
 		t.Fatal("enabling the bell must ring only for new transitions")
 	}
 }
@@ -130,7 +130,7 @@ func TestAttentionBellTransitions(t *testing.T) {
 		{"%1", "error", "", false},
 		{"%missing", "done", "", false},
 	} {
-		e := statusEvent{tc.pane, tc.state, tc.reason}
+		e := statusEvent{Pane: tc.pane, State: tc.state, Reason: tc.reason}
 		if ring := w.applyEvent(e); ring != tc.ring {
 			t.Errorf("%+v: rang %t, want %t", e, ring, tc.ring)
 		}

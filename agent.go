@@ -84,6 +84,9 @@ func (w *workspace) agent(id string) (*codexAgent, error) {
 		return nil, errors.New("the terminal has exited")
 	}
 	if t.agent == nil {
+		if t.term.Program == "claude" {
+			return nil, errors.New("use read_terminal and send_input to interact with Claude Code")
+		}
 		return nil, errors.New("open a terminal with launch_codex to use Codex run tracking")
 	}
 	return t.agent, nil
@@ -367,7 +370,7 @@ func (w *workspace) waitRun(ctx context.Context, in runWaitArgs) (runWaitResult,
 }
 
 func (w *workspace) registerAgentTools(s *mcp.Server) {
-	register(s, "create_or_open_workspace", "Create or open a Kowloon workspace directory. Set init_git to initialize Git. Set launch_codex to start an interactive agent.", w.createWorkspace)
+	register(s, "create_or_open_workspace", "Create or open a Kowloon workspace directory. Set init_git to initialize Git. Set launch_codex or launch_claude to start an interactive agent.", w.createWorkspace)
 	registerCtx(s, "get_agent_status", "Read Codex prompt readiness and any setup decision for a Kowloon terminal.", func(ctx context.Context, a termArgs) (agentStatus, error) { return w.agentStatus(ctx, a.ID) })
 	register(s, "answer_setup", "Answer the current Kowloon folder trust or hook review decision with a listed choice.", func(in decisionArgs) (ack, error) {
 		a, err := w.agent(in.ID)

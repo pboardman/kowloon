@@ -70,6 +70,11 @@ func dispatch(args []string) error {
 			if len(a) == 2 {
 				return watch(p, "%"+a[1], os.Stdin)
 			}
+		case "_claude_status":
+			if len(a) == 1 {
+				claudeStatus(p, os.Getenv("TMUX_PANE"), os.Stdin)
+				return nil
+			}
 		case "_codex":
 			if len(a) == 4 || len(a) == 5 {
 				thread := ""

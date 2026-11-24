@@ -184,12 +184,22 @@ func runCodexPane(dir, exe, trustRoot, thread string) error {
 }
 
 type createWorkspaceArgs struct {
-	Path        string `json:"path" jsonschema:"Absolute directory path to create or open"`
-	InitGit     bool   `json:"init_git,omitempty" jsonschema:"Initialize Git only if there is no enclosing repository"`
-	LaunchCodex bool   `json:"launch_codex,omitempty" jsonschema:"Open a Codex terminal instead of a shell"`
+	Path         string `json:"path" jsonschema:"Absolute directory path to create or open"`
+	InitGit      bool   `json:"init_git,omitempty" jsonschema:"Initialize Git only if there is no enclosing repository"`
+	LaunchClaude bool   `json:"launch_claude,omitempty" jsonschema:"Open a Claude Code terminal instead of a shell"`
+	LaunchCodex  bool   `json:"launch_codex,omitempty" jsonschema:"Open a Codex terminal instead of a shell"`
 }
 
 func (w *workspace) createWorkspace(a createWorkspaceArgs) (Terminal, error) {
+	program := launchShell
+	switch {
+	case a.LaunchClaude && a.LaunchCodex:
+		return Terminal{}, errors.New("choose one agent to launch")
+	case a.LaunchClaude:
+		program = launchClaude
+	case a.LaunchCodex:
+		program = launchCodex
+	}
 	if !filepath.IsAbs(a.Path) {
 		return Terminal{}, errors.New("supply an absolute workspace path")
 	}
@@ -219,12 +229,13 @@ func (w *workspace) createWorkspace(a createWorkspaceArgs) (Terminal, error) {
 		if t.term.CWD != path || t.term.State == "exited" {
 			continue
 		}
-		matchingShell := !a.LaunchCodex && t.agent == nil && t.term.State == "shell" && isShell(t.term.Program)
-		matchingAgent := a.LaunchCodex && t.agent != nil && t.agent.cwd == path
-		if matchingShell || matchingAgent {
+		matchingShell := program == launchShell && t.agent == nil && t.term.State == "shell" && isShell(t.term.Program)
+		matchingCodex := a.LaunchCodex && t.agent != nil && t.agent.cwd == path
+		matchingClaude := a.LaunchClaude && t.claudePane
+		if matchingShell || matchingCodex || matchingClaude {
 			t.term.Checkout = w.resolve(path)
 			return t.term, w.selectLocked(t.term.ID, true)
 		}
 	}
-	return w.spawn(path, a.LaunchCodex)
+	return w.spawn(path, program)
 }

@@ -16,9 +16,10 @@ type Status struct {
 	Revision uint64 `json:"revision"`
 }
 type statusEvent struct {
-	Pane   string
-	State  string
-	Reason string
+	Pane    string
+	State   string
+	Reason  string
+	Program string `json:",omitempty"`
 }
 
 func (e statusEvent) needsAttention() bool {
@@ -29,13 +30,15 @@ func (e statusEvent) needsAttention() bool {
 	return false
 }
 
-// Codex writes OSC 7501 to its PTY. tmux pipe-pane delivers the original bytes,
+// Agents write OSC 7501 to their PTY. tmux pipe-pane delivers the original bytes,
 // including in parked panes. Retain only an incomplete record between reads.
 var oscStart = []byte("\x1b]7501;")
 
+const maxStatusRecord = 4096
+
 type statusParser struct{ pending []byte }
 
-func (p *statusParser) feed(data []byte, emit func(string, string)) {
+func (p *statusParser) feed(data []byte, emit func(statusEvent)) {
 	b := append(p.pending, data...)
 	p.pending = nil
 	for len(b) > 0 {
@@ -52,7 +55,7 @@ func (p *statusParser) feed(data []byte, emit func(string, string)) {
 		b = b[i:]
 		end := bytes.IndexAny(b[len(oscStart):], "\x07\x1b")
 		if end < 0 {
-			if len(b) <= 1024 {
+			if len(b) <= maxStatusRecord {
 				p.pending = append([]byte(nil), b...)
 			}
 			return
@@ -60,7 +63,7 @@ func (p *statusParser) feed(data []byte, emit func(string, string)) {
 		end += len(oscStart)
 		if b[end] == 0x1b {
 			if end+1 == len(b) {
-				if len(b) <= 1024 {
+				if len(b) <= maxStatusRecord {
 					p.pending = append([]byte(nil), b...)
 				}
 				return
@@ -72,39 +75,48 @@ func (p *statusParser) feed(data []byte, emit func(string, string)) {
 		}
 		record := b[len(oscStart):end]
 		b = b[end+1:]
-		if len(record) > 1024 {
+		if len(record) > maxStatusRecord {
 			continue
 		}
-		var state, app, kind string
+		var state, app, kind, id string
 		for _, part := range strings.Split(string(record), ":") {
 			k, v, _ := strings.Cut(part, "=")
 			switch k {
 			case "state":
 				state = v
+			case "id":
+				id = v
 			case "kind":
 				kind = v
 			case "app":
 				app = v
 			}
 		}
-		if state == "clear" {
-			emit("shell", "")
+		// A child (such as a subagent) does not own the pane's status.
+		if id != "" {
 			continue
 		}
-		if app != "codex" {
+		if state == "clear" && (app == "" || app == "codex" || app == "claude-code") {
+			emit(statusEvent{State: "shell"})
+			continue
+		}
+		program := app
+		if app == "claude-code" {
+			program = "claude"
+		} else if app != "codex" {
 			continue
 		}
 		switch state {
 		case "idle", "working", "done", "error":
-			emit(state, "")
+			emit(statusEvent{State: state, Program: program})
 		case "blocked":
 			switch kind {
 			case "question":
-				emit("waiting", "question")
+				emit(statusEvent{State: "waiting", Reason: "question", Program: program})
 			case "auth", "permission":
-				emit("blocked", kind)
+				emit(statusEvent{State: "blocked", Reason: kind, Program: program})
 			default:
-				emit("blocked", "")
+				emit(statusEvent{State: "blocked", Program: program})
 			}
 		}
 	}
@@ -120,8 +132,9 @@ func watch(p runtimePaths, pane string, r io.Reader) error {
 	buf := make([]byte, 32768)
 	for {
 		n, err := r.Read(buf)
-		parser.feed(buf[:n], func(s, reason string) {
-			b, _ := json.Marshal(statusEvent{pane, s, reason})
+		parser.feed(buf[:n], func(event statusEvent) {
+			event.Pane = pane
+			b, _ := json.Marshal(event)
 			c.SetWriteDeadline(time.Now().Add(time.Second))
 			_, _ = c.Write(b)
 		})

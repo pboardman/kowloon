@@ -8,6 +8,7 @@ import (
 
 type conversation struct {
 	ID       string   `json:"conversation_id"`
+	Program  string   `json:"program,omitempty"`
 	Checkout Checkout `json:"checkout"`
 	Title    string   `json:"title,omitempty"`
 	Status
@@ -31,7 +32,7 @@ func (w *workspace) listConversations() conversationList {
 				tracked.missedNotices = false
 				tracked.conversationListed = true
 			}
-			c := conversation{ID: t.ID, Checkout: t.Checkout, Title: t.Title, Status: t.Status, ActiveRun: t.ActiveRun}
+			c := conversation{ID: t.ID, Program: t.Program, Checkout: t.Checkout, Title: t.Title, Status: t.Status, ActiveRun: t.ActiveRun}
 			for _, q := range w.questions {
 				if q.TerminalID == t.ID {
 					c.PendingQuestions = append(c.PendingQuestions, q.questionRequest)

@@ -22,14 +22,16 @@ import (
 // Store only the information needed to recover. Terminal output, command lines,
 // prompts, environment variables, and setup approvals are not part of this file.
 type savedPane struct {
-	ID          string
-	CWD         string
-	Status      Status
-	History     []Status `json:",omitempty"`
-	AgentDir    string   `json:",omitempty"` // basename in the private runtime directory
-	AgentCWD    string   `json:",omitempty"`
-	Thread      string   `json:",omitempty"`
-	ManualCodex bool     `json:",omitempty"`
+	ID           string
+	CWD          string
+	Status       Status
+	History      []Status `json:",omitempty"`
+	AgentDir     string   `json:",omitempty"` // basename in the private runtime directory
+	AgentCWD     string   `json:",omitempty"`
+	Thread       string   `json:",omitempty"`
+	ManualClaude bool     `json:",omitempty"`
+	ClaudePane   bool     `json:",omitempty"`
+	ManualCodex  bool     `json:",omitempty"`
 }
 type savedRun struct {
 	Run        run
@@ -92,7 +94,12 @@ func (w *workspace) saveLocked() error {
 		if t.term.State == "exited" {
 			continue
 		}
-		p := savedPane{ID: t.term.ID, CWD: t.term.CWD, Status: t.term.Status, History: t.history, ManualCodex: t.term.Program == "codex"}
+		p := savedPane{
+			ID: t.term.ID, CWD: t.term.CWD, Status: t.term.Status, History: t.history,
+			ClaudePane:   t.claudePane,
+			ManualClaude: !t.claudePane && t.term.hasAgent() && t.term.Program == "claude",
+			ManualCodex:  t.term.Program == "codex",
+		}
 		if a := t.agent; a != nil {
 			p.AgentDir = filepath.Base(a.dir)
 			p.AgentCWD = a.cwd
@@ -204,6 +211,10 @@ func (w *workspace) adoptPanes(s savedSession) (map[string]string, error) {
 		}
 		p := old[id]
 		t := &tracked{term: Terminal{ID: id, CWD: cwd, Checkout: w.resolve(cwd), Status: p.Status}, history: p.History}
+		if p.ClaudePane || p.ManualClaude {
+			t.term.Program = "claude"
+			t.claudePane = p.ClaudePane
+		}
 		if t.term.State == "" {
 			t.term.State = "shell"
 		}
@@ -258,7 +269,13 @@ func (w *workspace) restorePanes(s savedSession) (map[string]string, error) {
 			w.pending = append(w.pending, p)
 			continue
 		}
-		term, err := w.spawnTerminal(path, p.AgentDir != "", p.Thread, p.ManualCodex)
+		program := launchShell
+		if p.AgentDir != "" {
+			program = launchCodex
+		} else if p.ClaudePane || p.ManualClaude {
+			program = launchClaude
+		}
+		term, err := w.spawnTerminal(path, program, p.Thread, p.ManualCodex || program == launchClaude)
 		if errors.Is(err, exec.ErrNotFound) {
 			p.ID = ""
 			w.pending = append(w.pending, p)
@@ -363,7 +380,7 @@ func (w *workspace) recoverSession(path, mode string) error {
 	}
 	w.restoreRuns(saved, ids, live)
 	if path != "" {
-		if _, err = w.open(path, false, false); err != nil {
+		if _, err = w.open(path, launchShell, false); err != nil {
 			return err
 		}
 	}

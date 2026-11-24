@@ -123,6 +123,9 @@ func agentRows(s Snapshot) []row {
 		if counts[t.Checkout.Path] > 1 {
 			project += " " + t.ID
 		}
+		if t.Program == "claude" {
+			project += " · Claude Code"
+		}
 		r := terminalRow(t, s.Active, " ", project)
 		if t.Checkout.Branch != "" {
 			r.detail = "    " + t.Checkout.Branch
@@ -171,7 +174,11 @@ func repositoryRows(s Snapshot) []row {
 			if t.State == "exited" || t.Checkout.Path != c.Path {
 				continue
 			}
-			rows = append(rows, terminalRow(t, s.Active, indent, "Codex"))
+			name := "Codex"
+			if t.Program == "claude" {
+				name = "Claude Code"
+			}
+			rows = append(rows, terminalRow(t, s.Active, indent, name))
 		}
 	}
 	return rows
@@ -267,7 +274,7 @@ func (u *ui) currentPath() string {
 	return "/"
 }
 func (u *ui) newTerminal() {
-	_, err := u.w.open("~", false, false)
+	_, err := u.w.open("~", launchShell, false)
 	u.report(err)
 }
 func (u *ui) promptWorktree(path string) {
@@ -287,7 +294,7 @@ func (u *ui) menu(r row) {
 	u.notice = ""
 }
 func (u *ui) choices() []string {
-	choices := []string{"New terminal", "Create worktree"}
+	choices := []string{"New terminal", "Create worktree", "Launch Claude Code"}
 	if u.id != "" {
 		choices = append(choices, "Close terminal")
 	}
@@ -298,10 +305,12 @@ func (u *ui) action(i int) {
 	var err error
 	switch i {
 	case 0:
-		_, err = u.w.open(u.path, false, false)
+		_, err = u.w.open(u.path, launchShell, false)
 	case 1:
 		u.promptWorktree(u.path)
 	case 2:
+		_, err = u.w.open(u.path, launchClaude, false)
+	case 3:
 		u.mode = "close"
 	}
 	u.report(err)
@@ -325,7 +334,7 @@ func (u *ui) activate() {
 		if id != "" {
 			u.report(u.w.selectTerm(id))
 		} else {
-			_, err := u.w.open(r.path, false, false)
+			_, err := u.w.open(r.path, launchShell, false)
 			u.report(err)
 		}
 	}

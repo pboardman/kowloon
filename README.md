@@ -4,7 +4,7 @@ Kowloon runs coding agents in terminal panes. The sidebar groups terminals by Gi
 
 ## Run Kowloon
 
-Install Go 1.25 or later, Git 2.43 or later, and tmux 3.4 or later. Install Codex CLI to use the Codex controls. Build and start Kowloon from its source directory.
+Install Go 1.25 or later, Git 2.43 or later, and tmux 3.4 or later. Install Claude Code or Codex CLI for the agent you want to run. Build and start Kowloon from its source directory.
 
 ```sh
 go build -o kowloon .
@@ -18,6 +18,7 @@ Running `kowloon` reattaches to the running workspace. If the workspace stopped,
 | Open a terminal | Click + New or press `n` in the sidebar to open a shell in your home directory. Use `cd` to enter a repository. |
 | Switch terminals | Click a terminal or its checkout. |
 | Create a worktree | Right-click the source checkout, choose Create worktree, and enter a branch name. |
+| Launch Claude Code | Select a checkout, press `m`, and choose Launch Claude Code. |
 | Launch Codex | Type `codex` in a shell. |
 | Resize the sidebar | Drag the divider. Kowloon sizes the sidebar automatically until you set its width. |
 | Use the sidebar with the keyboard | Press Ctrl+B, then Left. Use the arrow keys and Enter. Press `m` for actions or `s` for Settings. |
@@ -30,7 +31,7 @@ Running `kowloon` reattaches to the running workspace. If the workspace stopped,
 
 Kowloon creates worktrees under `$XDG_DATA_HOME/kowloon/worktrees`. The default base directory is `~/.local/share`. For a new branch, Git starts from the selected checkout. For an existing local branch, Git uses that branch if another worktree does not have it checked out.
 
-Agent mode lists open Codex sessions in terminal creation order. Each entry shows the status symbol, repository, and available task title. The branch appears on the line below. An idle agent or a finished turn stays visible until Codex exits. Use the arrow keys and Enter to open a listed terminal.
+Agent mode lists open Claude Code and Codex sessions in terminal creation order. Each entry shows the status symbol, repository, and available task title. The branch appears on the line below. An idle agent or a finished turn stays visible until the agent exits. Use the arrow keys and Enter to open a listed terminal.
 
 ## Session recovery
 
@@ -38,30 +39,32 @@ For an upgrade, install the new binary and run `kowloon --restart`. This replace
 
 After a reboot or a tmux shutdown, run `kowloon` to reopen the saved workspace. Kowloon restores terminal directories, worktrees, the selected terminal, agent mode, and sidebar width. Shells start fresh in their saved directories. Commands interrupted by the shutdown need to be started again.
 
-For a managed Codex terminal, answer the folder and hook questions to resume its saved conversation. For Codex started by hand, choose the conversation from the Codex resume picker. Kowloon keeps run receipts and reports an unconfirmed turn as `unavailable`. Cold recovery can assign new terminal IDs. MCP clients can use `list_workspace` to get the current IDs.
+For a Claude Code terminal, choose the conversation from the Claude Code resume picker. For a managed Codex terminal, answer the folder and hook questions to resume its saved conversation. For Codex started by hand, choose the conversation from the Codex resume picker. Kowloon keeps run receipts and reports an unconfirmed turn as `unavailable`. Cold recovery can assign new terminal IDs. MCP clients can use `list_workspace` to get the current IDs.
 
 Use `kowloon --no-restore` to start empty after shutdown, or `kowloon --no-restore /path/to/repo` to open just that directory. The fresh workspace replaces the saved session. When tmux is still running, Kowloon reattaches to the live workspace.
 
 Kowloon saves changes automatically in `session.json` beside the MCP key. Only your account can read the file. The file contains workspace metadata and run receipts. Terminal contents, prompts, and approval choices stay outside the file. If a saved directory is unavailable, Kowloon tries it again at the next cold start.
 
-## Codex status
+## Agent status
 
-Kowloon reads status events directly from each terminal, including terminals in the background. Codex CLI 0.170.0 emits these events through the OSC 7501 terminal protocol. Each sidebar state has its own symbol. [Codex terminal status implementation](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/tui/src/terminal_program_status.rs)
+Kowloon tracks activity in visible and background terminals. Codex CLI 0.170.0 sends OSC 7501 status reports through its terminal. [Codex terminal status implementation](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/tui/src/terminal_program_status.rs)
+
+When you launch Claude Code from the sidebar or with `launch_claude`, Kowloon supplies hooks for that session. A hook runs a command when Claude Code reports an event. [Claude Code hooks](https://code.claude.com/docs/en/hooks)
 
 | Sidebar | MCP state | Meaning |
 | --- | --- | --- |
-| ◌ / … | `starting` / `unknown` | Kowloon launched or detected Codex and awaits its first status event. |
-| ○ | `idle` | The terminal reports idle. Use `get_agent_status` for prompt readiness. |
-| ● | `working` | Codex is processing a turn. |
-| ? | `waiting` | Codex needs an answer. The reason is `question`. |
-| ! / @ | `blocked` | Codex needs permission or authentication. The reason is `permission` or `auth`. |
-| ⊘ | `blocked` | Codex reports another blocker. |
-| ✓ / × | `done` / `error` | Codex finished a turn or reported an error. |
+| ◌ / … | `starting` / `unknown` | Kowloon launched or detected the agent and awaits its first status event. |
+| ○ | `idle` | The terminal reports idle. For managed Codex, use `get_agent_status` for prompt readiness. |
+| ● | `working` | The agent is processing a turn. |
+| ? | `waiting` | The agent needs an answer. The reason is `question`. |
+| ! / @ | `blocked` | The agent needs permission or authentication. The reason is `permission` or `auth`. |
+| ⊘ | `blocked` | The agent reports another blocker. |
+| ✓ / × | `done` / `error` | The agent finished a turn or reported an error. |
 | Hidden | `exited` | The terminal process ended. MCP can read its final screen until you close the terminal. |
 
-Kowloon rings the terminal bell when Codex finishes a turn, asks a question, needs approval or sign-in, reports another blocker, or reports an error. This includes background agents in either sidebar view. Repeated reports of the same state and reason ring once. The agent bell is on by default. In sidebar Settings, press `b` or click **Agent bell** to switch it off or on. Kowloon saves your choice for future workspaces. To hear the bell, enable audible bells in your terminal settings.
+Kowloon rings the terminal bell when an agent finishes a turn, asks a question, needs approval or sign-in, reports another blocker, or reports an error. This includes background agents in either sidebar view. Repeated reports of the same state and reason ring once. The agent bell is on by default. In sidebar Settings, press `b` or click **Agent bell** to switch it off or on. Kowloon saves your choice for future workspaces. To hear the bell, enable audible bells in your terminal settings.
 
-Other interactive programs run in the same terminal pane. V1 tracks agent lifecycle events for Codex.
+If you type `claude` in a shell, Kowloon lists the session. In tmux, its state can stay `unknown`. Use Launch Claude Code for activity updates and the agent bell. Answer sign-in prompts, questions, and permission requests in the Claude Code terminal. MCP clients can use `read_terminal` and `send_input` for the same interactions. Codex provides the separate run receipts and structured question tools.
 
 ## Connect an MCP client
 
@@ -92,6 +95,12 @@ codex mcp add kowloon --url http://127.0.0.1:9417/mcp --bearer-token-env-var KOW
 codex
 ```
 
+To register Kowloon with Claude Code, export `KOWLOON_MCP_KEY` in Bash as shown above. Run this command in the project where you want Claude Code to control Kowloon. The single quotes keep the key itself out of the saved configuration. [Claude Code MCP configuration](https://code.claude.com/docs/en/mcp)
+
+```bash
+claude mcp add --transport http kowloon http://127.0.0.1:9417/mcp --header 'Authorization: Bearer ${KOWLOON_MCP_KEY}'
+```
+
 Start the MCP client in an environment that contains `KOWLOON_MCP_KEY`. To start Kowloon without attaching a terminal, run `kowloon --detach /path/to/repo`.
 
 | Tool | Action |
@@ -102,7 +111,8 @@ Start the MCP client in an environment that contains `KOWLOON_MCP_KEY`. To start
 | `list_workspace` | Get checkout paths, branches, terminal IDs, titles, states, and the active terminal. |
 | `open_repo` / `new_terminal` | Open a shell at a checkout root or in a directory. |
 | `create_worktree` | Create a named checkout and open a shell there. |
-| `create_or_open_workspace` | Create a directory or reuse a terminal there. Set `init_git` to initialize Git and `launch_codex` to open Codex. |
+| `create_or_open_workspace` | Create a directory or reuse a terminal there. Set `init_git` to initialize Git and either `launch_claude` or `launch_codex` to choose the agent. |
+| `launch_claude` | Open a new interactive Claude Code terminal with status updates. |
 | `launch_codex` | Open a new interactive Codex terminal with run tracking. |
 | `get_agent_status` | Read `can_submit` and the current setup decision for a terminal. |
 | `answer_setup` | Choose how Codex handles folder trust or hooks for this session. |

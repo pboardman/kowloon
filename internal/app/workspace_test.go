@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 // Exercise the exact same subprocess entry points as the installed binary.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "_") {
-		main()
+		Main()
 		return
 	}
 	os.Exit(m.Run())

@@ -167,6 +167,12 @@ For each request, Linden passes the returned `request_id` to `answer_question` w
 
 A `sent` receipt means Kowloon sent the reply to Codex. Codex resolves the request once, even if someone also answers in the terminal. Use `wait_for_run` to see what happens next.
 
+## Repository layout
+
+- [internal/app/](internal/app/) contains the application, its tests, and the tmux configuration that Go embeds in the executable.
+- [releases/](releases/) holds release notes.
+- [.github/workflows/](.github/workflows/) contains the GitHub Actions workflow that builds and tests Kowloon on pushes and pull requests.
+
 ## Tests
 
 Run `go test ./...` for the unit tests. The integration test starts a private tmux server, uses a temporary repository, and exercises the HTTP tools. Use the following command to include the integration test and launch the installed Codex CLI.

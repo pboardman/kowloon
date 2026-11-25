@@ -170,7 +170,6 @@ A `sent` receipt means Kowloon sent the reply to Codex. Codex resolves the reque
 ## Repository layout
 
 - [internal/app/](internal/app/) contains the application, its tests, and the tmux configuration that Go embeds in the executable.
-- [releases/](releases/) holds release notes.
 - [.github/workflows/](.github/workflows/) contains the GitHub Actions workflow that builds and tests Kowloon on pushes and pull requests.
 
 ## Tests

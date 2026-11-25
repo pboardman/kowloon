@@ -2,6 +2,12 @@
 
 A minimal agent multiplexer using tmux for session persistence.
 
+## Installing
+
+- Grab a tarball from the latest [Release](https://github.com/pboardman/kowloon/releases/latest)
+- Unzip it and put the `kowloon` binary somewhere in your PATH
+- Run `kowloon`
+
 ## Building
 
 Kowloon has been tested on Linux and MacOS right now, compatibility with Windows is unknown.

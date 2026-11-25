@@ -2,6 +2,11 @@
 
 A minimal agent multiplexer using tmux for session persistence.
 
+## Info
+
+- For now Codex and Claude Code are supported, other harnesses will work but might not have the right Agent Status
+- Kowloon has been tested on Linux and MacOS right now, compatibility with Windows is unknown.
+
 ## Installing
 
 - Grab a tarball from the latest [Release](https://github.com/pboardman/kowloon/releases/latest)
@@ -9,8 +14,6 @@ A minimal agent multiplexer using tmux for session persistence.
 - Run `kowloon`
 
 ## Building
-
-Kowloon has been tested on Linux and MacOS right now, compatibility with Windows is unknown.
 
 Install Go 1.25 or later, git, and tmux then run:
 

@@ -22,6 +22,7 @@ import (
 // Store only the information needed to recover. Terminal output, command lines,
 // prompts, environment variables, and setup approvals are not part of this file.
 type savedPane struct {
+	Name         string `json:",omitempty"`
 	ID           string
 	CWD          string
 	Status       Status
@@ -95,7 +96,7 @@ func (w *workspace) saveLocked() error {
 			continue
 		}
 		p := savedPane{
-			ID: t.term.ID, CWD: t.term.CWD, Status: t.term.Status, History: t.history,
+			ID: t.term.ID, Name: t.term.Name, CWD: t.term.CWD, Status: t.term.Status, History: t.history,
 			ClaudePane:   t.claudePane,
 			ManualClaude: !t.claudePane && t.term.hasAgent() && t.term.Program == "claude",
 			ManualCodex:  t.term.Program == "codex",
@@ -210,7 +211,7 @@ func (w *workspace) adoptPanes(s savedSession) (map[string]string, error) {
 			continue
 		}
 		p := old[id]
-		t := &tracked{term: Terminal{ID: id, CWD: cwd, Checkout: w.resolve(cwd), Status: p.Status}, history: p.History}
+		t := &tracked{term: Terminal{ID: id, Name: p.Name, CWD: cwd, Checkout: w.resolve(cwd), Status: p.Status}, history: p.History}
 		if p.ClaudePane || p.ManualClaude {
 			t.term.Program = "claude"
 			t.claudePane = p.ClaudePane
@@ -284,6 +285,7 @@ func (w *workspace) restorePanes(s savedSession) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		w.terms[term.ID].term.Name = p.Name
 		if p.ID != "" {
 			ids[p.ID] = term.ID
 		}

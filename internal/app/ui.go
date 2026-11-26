@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"iter"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 )
 
 const (
+	repoColor   = "\x1b[38;5;183m"
 	headerColor = "\x1b[1;38;5;203m"
 	divider     = "\x1b[38;5;239m"
 	muted       = "\x1b[38;5;246m"
@@ -23,7 +25,7 @@ const (
 	reset       = "\x1b[0m"
 )
 
-type row struct{ key, path, id, label, style, detail string }
+type row struct{ key, path, id, prefix, repo, label, style, detail, customName string }
 type tick time.Time
 type ui struct {
 	w                                        *workspace
@@ -95,38 +97,48 @@ func terminalRow(t Terminal, active, indent, name string) row {
 		marker = "›"
 	}
 	icon, color := badge(t)
-	if icon != " " {
-		dir := filepath.Base(t.Checkout.Path)
-		if task := strings.TrimSuffix(t.Title, " | "+dir); task != "" && task != dir {
-			name += " · " + task
-		}
+	if icon == " " {
+		name = cmp.Or(t.Name, t.Program)
 	} else {
-		name = t.Program
+		task := t.Name
+		if task == "" {
+			dir := filepath.Base(t.Checkout.Path)
+			task = strings.TrimSuffix(t.Title, " | "+dir)
+			if task == dir {
+				task = ""
+			}
+		}
+		if name != "" && task != "" {
+			name += " · "
+		}
+		name += task
 	}
-	return row{key: t.ID, path: t.Checkout.Path, id: t.ID, label: marker + indent + icon + " " + name, style: color}
+	return row{key: t.ID, path: t.Checkout.Path, id: t.ID, customName: t.Name, prefix: marker + indent + icon + " ", label: name, style: color}
+}
+
+func (r row) renderLabel() string {
+	label := clean(r.label)
+	if r.repo == "" {
+		return r.prefix + label
+	}
+	if label != "" {
+		label = " · " + label
+	}
+	return r.prefix + repoColor + clean(r.repo) + r.style + label
 }
 
 func agentRows(s Snapshot) []row {
-	// A shared checkout can have several agents with the same status and title.
-	counts := make(map[string]int)
-	for _, t := range s.Terminals {
-		if t.hasAgent() {
-			counts[t.Checkout.Path]++
-		}
-	}
 	var rows []row
 	for _, t := range s.Terminals {
 		if !t.hasAgent() {
 			continue
 		}
-		project := filepath.Base(t.Checkout.Repo)
-		if counts[t.Checkout.Path] > 1 {
-			project += " " + t.ID
-		}
+		name := ""
 		if t.Program == "claude" {
-			project += " · Claude Code"
+			name = "Claude Code"
 		}
-		r := terminalRow(t, s.Active, " ", project)
+		r := terminalRow(t, s.Active, " ", name)
+		r.repo = filepath.Base(t.Checkout.Repo)
 		if t.Checkout.Branch != "" {
 			r.detail = "    " + t.Checkout.Branch
 		}
@@ -139,7 +151,7 @@ func autoSidebarWidth(s Snapshot, windowWidth int) int {
 	width := 28
 	if s.AgentMode {
 		for _, r := range agentRows(s) {
-			width = max(width, ansi.StringWidth(r.label)+1, ansi.StringWidth(r.detail)+1)
+			width = max(width, ansi.StringWidth(r.renderLabel())+1, ansi.StringWidth(r.detail)+1)
 		}
 	} else {
 		for _, c := range s.Checkouts {
@@ -290,25 +302,28 @@ func (u *ui) menu(r row) {
 	u.mode = "menu"
 	u.path = r.path
 	u.id = r.id
+	u.entry = r.customName
 	u.menuIndex = 0
 	u.notice = ""
 }
 func (u *ui) choices() []string {
 	choices := []string{"New terminal", "Create worktree"}
 	if u.id != "" {
-		choices = append(choices, "Close terminal")
+		choices = append(choices, "Rename terminal", "Close terminal")
 	}
 	return choices
 }
 func (u *ui) action(i int) {
 	u.mode = ""
 	var err error
-	switch i {
-	case 0:
+	switch u.choices()[i] {
+	case "New terminal":
 		_, err = u.w.open(u.path, launchShell, false)
-	case 1:
+	case "Create worktree":
 		u.promptWorktree(u.path)
-	case 2:
+	case "Rename terminal":
+		u.mode = "rename"
+	case "Close terminal":
 		u.mode = "close"
 	}
 	u.report(err)
@@ -395,7 +410,7 @@ func (u *ui) key(k tea.KeyMsg) {
 			u.mode = ""
 		}
 		return
-	case "tree":
+	case "tree", "rename":
 		switch key {
 		case "ctrl+u":
 			u.entry = ""
@@ -405,7 +420,12 @@ func (u *ui) key(k tea.KeyMsg) {
 				u.entry = string(r[:len(r)-1])
 			}
 		case "enter":
-			_, err := u.w.addTree(u.path, u.entry)
+			var err error
+			if u.mode == "rename" {
+				err = u.w.renameTerm(u.id, u.entry)
+			} else {
+				_, err = u.w.addTree(u.path, u.entry)
+			}
 			if err == nil {
 				u.mode = ""
 			}
@@ -504,7 +524,7 @@ func (u *ui) mouse(m tea.MouseMsg) {
 			u.mode = ""
 		}
 		return
-	case "tree":
+	case "tree", "rename":
 		if m.Y == u.height-1 {
 			u.mode = ""
 		}
@@ -608,11 +628,12 @@ func (u *ui) View() string {
 		return ""
 	}
 	lines := make([]string, u.height)
-	put := func(y int, s, color string) {
+	putStyled := func(y int, s, color string) {
 		if y >= 0 && y < len(lines) {
-			lines[y] = color + ansi.Truncate(clean(s), u.width, "…") + reset
+			lines[y] = color + ansi.Truncate(s, u.width, "…") + reset
 		}
 	}
+	put := func(y int, s, color string) { putStyled(y, clean(s), color) }
 	put(0, " KOWLOON"+strings.Repeat(" ", u.newButtonColumn()-len(" KOWLOON"))+"+ New ", headerColor)
 	put(1, strings.Repeat("─", u.width), muted)
 	noticeY := u.height - 2
@@ -657,20 +678,24 @@ func (u *ui) View() string {
 			put(3+i, mark+name, style)
 		}
 		put(u.height-1, " Esc  Back", muted)
-	case "tree":
-		put(0, " Create worktree", accent)
-		put(2, " Branch name", muted)
+	case "tree", "rename":
+		heading, field, submit := " Create worktree", " Branch name", " Enter  Open"
+		if u.mode == "rename" {
+			heading, field, submit = " Rename terminal", " Terminal name", " Enter  Save"
+		}
+		put(0, heading, accent)
+		put(2, field, muted)
 		width := max(1, u.width-4)
 		value := u.entry
 		if ansi.StringWidth(value) > width {
 			value = "…" + ansi.TruncateLeft(value, ansi.StringWidth(value)-width+1, "")
 		}
 		put(4, " › "+value+"▏", title)
-		put(6, " Enter  Open", accent)
+		put(6, submit, accent)
 		put(7, " Ctrl+u  Clear", muted)
 		put(u.height-1, " Esc  Back", muted)
 	case "close":
-		put(0, " Close terminal "+u.id, title)
+		put(0, " Close terminal "+cmp.Or(u.entry, filepath.Base(u.path)), title)
 		put(2, " Stop its running program?", amber)
 		put(4, " [y] Stop terminal", red)
 		put(5, " [n] Cancel", muted)
@@ -690,7 +715,7 @@ func (u *ui) View() string {
 			if i == u.cursor {
 				background = "\x1b[48;5;237m"
 			}
-			put(y, r.label, r.style+background)
+			putStyled(y, r.renderLabel(), r.style+background)
 			if r.detail != "" && y+1 < u.footerDividerY() {
 				put(y+1, r.detail, muted+background)
 			}

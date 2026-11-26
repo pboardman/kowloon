@@ -19,6 +19,7 @@ type Terminal struct {
 	CWD       string   `json:"cwd"`
 	Checkout  Checkout `json:"checkout"`
 	Program   string   `json:"program"`
+	Name      string   `json:"name,omitempty"`
 	Title     string   `json:"title,omitempty"`
 	ActiveRun *run     `json:"active_run,omitempty"`
 	Status
@@ -447,6 +448,23 @@ func (w *workspace) addTree(path, branch string) (Terminal, error) {
 	}
 	return w.spawn(c.Path, launchShell)
 }
+func (w *workspace) renameTerm(id, name string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	t, err := w.lookup(id)
+	if err != nil {
+		return err
+	}
+	old := t.term.Name
+	t.term.Name = strings.TrimSpace(clean(name))
+	if err := w.saveLocked(); err != nil {
+		t.term.Name = old
+		return err
+	}
+	w.notify()
+	return nil
+}
+
 func (w *workspace) selectTerm(id string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -113,7 +113,7 @@ func TestClaudeConversation(t *testing.T) {
 	snap := w.snapshot()
 	for _, rows := range [][]row{repositoryRows(snap), agentRows(snap)} {
 		r := rows[len(rows)-1]
-		if r.id != term.ID || !strings.Contains(r.label, "Claude Code") || !strings.Contains(r.label, "?") {
+		if r.id != term.ID || !strings.Contains(r.renderLabel(), "Claude Code") || !strings.Contains(r.renderLabel(), "?") {
 			t.Fatal(r)
 		}
 	}
@@ -174,11 +174,11 @@ func TestClaudeRemovedFromMenu(t *testing.T) {
 		t.Fatal(got)
 	}
 	u.menu(row{path: "/repo", id: "%1"})
-	want := []string{"New terminal", "Create worktree", "Close terminal"}
+	want := []string{"New terminal", "Create worktree", "Rename terminal", "Close terminal"}
 	if got := u.choices(); !slices.Equal(got, want) {
 		t.Fatal(got)
 	}
-	u.action(2)
+	u.action(len(want) - 1)
 	if u.mode != "close" {
 		t.Fatalf("last menu action opened %q", u.mode)
 	}

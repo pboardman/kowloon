@@ -178,7 +178,7 @@ func TestRepositoryTerminalAlignment(t *testing.T) {
 	var labels []string
 	for _, r := range repositoryRows(s) {
 		if r.id != "" {
-			labels = append(labels, r.label)
+			labels = append(labels, r.renderLabel())
 		}
 	}
 	want := []string{"     bash", "›  ● Codex · Review tests", "       fish", "     ! Codex"}
@@ -207,25 +207,76 @@ func TestAgentModeRows(t *testing.T) {
 	for i, r := range u.rows {
 		term := w.terms[r.id].term
 		icon, _ := badge(term)
-		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(r.label, icon+" kowloon") || strings.TrimSpace(r.detail) != term.Checkout.Branch {
+		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(ansi.Strip(r.renderLabel()), icon+" kowloon") || strings.TrimSpace(r.detail) != term.Checkout.Branch {
 			t.Fatalf("agent row: %+v", r)
 		}
-		if term.Checkout.Path == repo.Path && !strings.Contains(r.label, "kowloon "+r.id) {
-			t.Fatalf("shared checkout missing terminal ID: %+v", r)
+		if strings.Contains(r.renderLabel(), r.id) || !strings.Contains(r.renderLabel(), themeRed+"kowloon"+r.style) {
+			t.Fatalf("unexpected repository label: %q", r.renderLabel())
 		}
 	}
-	if !strings.Contains(u.selected().label, "kowloon · Review tests") {
+	if !strings.Contains(ansi.Strip(u.selected().renderLabel()), "kowloon · Review tests") {
 		t.Fatal(u.selected())
 	}
 	w.terms["%2"].term.State = "shell"
 	w.terms[w.active].term.State = "done"
 	u.rebuild()
-	if u.selected().id != w.active || !strings.Contains(u.selected().label, "✓ kowloon") || u.rows[0].id == "%2" {
+	if u.selected().id != w.active || !strings.Contains(ansi.Strip(u.selected().renderLabel()), "✓ kowloon") || u.rows[0].id == "%2" {
 		t.Fatal(u.rows)
 	}
 	u.key(toggle)
 	if u.agentMode || u.selected().id != w.active || u.rows[0].id != "" {
 		t.Fatal(u.rows)
+	}
+}
+
+func TestRenameTerminalInBothModes(t *testing.T) {
+	w := newWorkspace(runtimePaths{config: t.TempDir()}, "%0")
+	w.instance, w.active, w.width = "test", "%2", 60
+	repo := Checkout{Repo: "/src/kowloon", Path: "/src/kowloon", Branch: "main"}
+	for _, id := range []string{"%1", "%2"} {
+		w.terms[id] = &tracked{term: Terminal{ID: id, CWD: repo.Path, Checkout: repo, Program: "codex", Title: "Review | kowloon", Status: Status{State: "working"}}}
+	}
+	u := newUI(w)
+	openRename := func() {
+		t.Helper()
+		u.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+		i := slices.Index(u.choices(), "Rename terminal")
+		if i < 0 {
+			t.Fatal(u.choices())
+		}
+		u.mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: 3 + i})
+		if u.mode != "rename" {
+			t.Fatal(u.mode)
+		}
+	}
+	openRename()
+	u.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Fix login")})
+	u.key(tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.Contains(ansi.Strip(u.View()), "Codex · Fix login") || w.terms["%1"].term.Name != "" {
+		t.Fatal(u.View())
+	}
+	saved, err := w.p.readSession()
+	if err != nil || len(saved.Panes) != 2 || saved.Panes[1].Name != "Fix login" {
+		t.Fatal(saved, err)
+	}
+	u.key(tea.KeyMsg{Type: tea.KeyF12})
+	if !strings.Contains(u.View(), themeRed+"kowloon"+blue+" · Fix login") {
+		t.Fatal(u.View())
+	}
+	openRename()
+	if u.entry != "Fix login" {
+		t.Fatal(u.entry)
+	}
+	u.key(tea.KeyMsg{Type: tea.KeyCtrlU})
+	u.key(tea.KeyMsg{Type: tea.KeyEsc})
+	if w.terms[w.active].term.Name != "Fix login" {
+		t.Fatal("cancel cleared the name")
+	}
+	openRename()
+	u.key(tea.KeyMsg{Type: tea.KeyCtrlU})
+	u.key(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := strings.Count(ansi.Strip(u.View()), "kowloon · Review"); got != 2 {
+		t.Fatalf("expected two agents with the same label, got %d", got)
 	}
 }
 

@@ -210,7 +210,7 @@ func TestAgentModeRows(t *testing.T) {
 		if r.id != fmt.Sprintf("%%%d", i+2) || r.path != term.Checkout.Path || !strings.Contains(ansi.Strip(r.renderLabel()), icon+" kowloon") || strings.TrimSpace(r.detail) != term.Checkout.Branch {
 			t.Fatalf("agent row: %+v", r)
 		}
-		if strings.Contains(r.renderLabel(), r.id) || !strings.Contains(r.renderLabel(), repoColor+"kowloon"+r.style) {
+		if strings.Contains(r.renderLabel(), r.id) || !strings.Contains(r.renderLabel(), themeRed+"kowloon"+r.style) {
 			t.Fatalf("unexpected repository label: %q", r.renderLabel())
 		}
 	}
@@ -260,7 +260,7 @@ func TestRenameTerminalInBothModes(t *testing.T) {
 		t.Fatal(saved, err)
 	}
 	u.key(tea.KeyMsg{Type: tea.KeyF12})
-	if !strings.Contains(u.View(), repoColor+"kowloon"+blue+" · Fix login") {
+	if !strings.Contains(u.View(), themeRed+"kowloon"+blue+" · Fix login") {
 		t.Fatal(u.View())
 	}
 	openRename()

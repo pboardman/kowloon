@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	repoColor   = "\x1b[38;5;183m"
-	headerColor = "\x1b[1;38;5;203m"
+	themeRed    = "\x1b[38;5;203m"
+	headerColor = "\x1b[1m" + themeRed
 	divider     = "\x1b[38;5;239m"
 	muted       = "\x1b[38;5;246m"
 	accent      = "\x1b[1;38;5;79m"
@@ -124,7 +124,7 @@ func (r row) renderLabel() string {
 	if label != "" {
 		label = " · " + label
 	}
-	return r.prefix + repoColor + clean(r.repo) + r.style + label
+	return r.prefix + themeRed + clean(r.repo) + r.style + label
 }
 
 func agentRows(s Snapshot) []row {

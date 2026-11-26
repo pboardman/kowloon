@@ -397,6 +397,9 @@ func serve(p runtimePaths, path, mode string, address netip.AddrPort) error {
 			}
 		}
 	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.watchClaudeSessions(ctx)
 	model := newUI(w)
 	if len(w.pending) > 0 {
 		model.notice = fmt.Sprintf("Restore skipped %d unavailable terminals", len(w.pending))

@@ -122,3 +122,64 @@ func TestClaudeConversation(t *testing.T) {
 		t.Fatal(event, err)
 	}
 }
+
+func TestClaudeSessionPoll(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeCommand := func(name, script string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCommand("claude", `[ "$*" = 'agents --json' ] || exit 1
+cat <<'JSON'
+[{"pid":11,"kind":"interactive","status":"waiting","waitingFor":"input needed"},
+ {"pid":12,"kind":"interactive","status":"waiting","waitingFor":"permission prompt"},
+ {"pid":13,"kind":"interactive","status":"busy"},
+ {"pid":14,"kind":"background","status":"idle"}]
+JSON`)
+	writeCommand("ps", `[ "$*" = '-p 11,12,13 -o pid=,tty=,stat=' ] || exit 1
+echo '11 pts/1 S+'
+echo '12 ttys002 S+'
+echo '13 ttys002 S'`)
+
+	w := newWorkspace(runtimePaths{dir: dir}, "%0")
+	w.agentBell = false
+	for id, tty := range map[string]string{"%1": "/dev/pts/1", "%2": "/dev/ttys002", "%3": "/dev/pts/3"} {
+		w.terms[id] = &tracked{term: Terminal{ID: id, Status: Status{State: "unknown"}}, claudeTTY: tty}
+	}
+	w.pollClaudeSessions(t.Context())
+	for _, tc := range []struct{ id, state, reason string }{
+		{"%1", "waiting", "question"},
+		{"%2", "blocked", "permission"},
+		{"%3", "unknown", ""},
+	} {
+		term := w.terms[tc.id].term
+		if term.State != tc.state || term.Reason != tc.reason {
+			t.Fatalf("pane %s: got %+v", tc.id, term)
+		}
+	}
+	w.applyEvent(statusEvent{Pane: "%2", Program: "claude", State: "done"})
+	w.pollClaudeSessions(t.Context())
+	if got := w.terms["%2"].term.State; got != "done" {
+		t.Fatalf("poll overwrote Claude's completion event: %s", got)
+	}
+}
+
+func TestClaudeRemovedFromMenu(t *testing.T) {
+	u := newUI(newWorkspace(runtimePaths{}, "%0"))
+	u.menu(row{path: "/repo"})
+	if got := u.choices(); !slices.Equal(got, []string{"New terminal", "Create worktree"}) {
+		t.Fatal(got)
+	}
+	u.menu(row{path: "/repo", id: "%1"})
+	want := []string{"New terminal", "Create worktree", "Close terminal"}
+	if got := u.choices(); !slices.Equal(got, want) {
+		t.Fatal(got)
+	}
+	u.action(2)
+	if u.mode != "close" {
+		t.Fatalf("last menu action opened %q", u.mode)
+	}
+}

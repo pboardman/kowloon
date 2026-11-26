@@ -46,7 +46,8 @@ Agent mode lists open Claude Code and Codex sessions in terminal creation order.
 
 ## Agent status
 
-Kowloon tracks activity in visible and background terminals. Here is the different possible status
+Run `claude` in a Kowloon terminal. Kowloon uses `claude agents --json` to track the session, even when you switch panes.
+For these sessions, Claude reports `idle` when it is ready for another prompt.
 
 | Sidebar | MCP state | Meaning |
 | --- | --- | --- |

@@ -294,7 +294,7 @@ func (u *ui) menu(r row) {
 	u.notice = ""
 }
 func (u *ui) choices() []string {
-	choices := []string{"New terminal", "Create worktree", "Launch Claude Code"}
+	choices := []string{"New terminal", "Create worktree"}
 	if u.id != "" {
 		choices = append(choices, "Close terminal")
 	}
@@ -309,8 +309,6 @@ func (u *ui) action(i int) {
 	case 1:
 		u.promptWorktree(u.path)
 	case 2:
-		_, err = u.w.open(u.path, launchClaude, false)
-	case 3:
 		u.mode = "close"
 	}
 	u.report(err)

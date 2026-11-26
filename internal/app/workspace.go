@@ -41,6 +41,8 @@ type tracked struct {
 	term               Terminal
 	history            []Status
 	claudePane         bool
+	claudeTTY          string
+	claudeReported     bool
 	agent              *codexAgent
 	notices            []conversationNotice
 	noticeRevision     uint64
@@ -103,6 +105,10 @@ func (w *workspace) status(t *tracked, state, reason string) bool {
 func (w *workspace) applyEvent(e statusEvent) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.applyEventLocked(e, true)
+}
+
+func (w *workspace) applyEventLocked(e statusEvent, fromAgent bool) bool {
 	if !slices.Contains(states, e.State) || !slices.Contains([]string{"", "auth", "permission", "question"}, e.Reason) {
 		return false
 	}
@@ -116,6 +122,12 @@ func (w *workspace) applyEvent(e statusEvent) bool {
 				return false
 			}
 			t.term.Program = e.Program
+			if e.Program == "claude" && fromAgent {
+				t.claudeReported = true
+			}
+		}
+		if e.State == "shell" {
+			t.claudeReported = false
 		}
 		changed := w.status(t, e.State, e.Reason)
 		if changed {
@@ -140,13 +152,13 @@ func (w *workspace) refresh() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// The path is last so spaces and tabs in directory names stay intact.
-	raw, err := w.p.tm("list-panes", "-a", "-F", "#{pane_id}\t#{pane_dead}\t#{pane_width}\t#{window_width}\t#{pane_current_command}\t#{s/[[:cntrl:]]/ /g:pane_title}\t#{pane_current_path}")
+	raw, err := w.p.tm("list-panes", "-a", "-F", "#{pane_id}\t#{pane_dead}\t#{pane_width}\t#{window_width}\t#{pane_current_command}\t#{pane_tty}\t#{s/[[:cntrl:]]/ /g:pane_title}\t#{pane_current_path}")
 	if err != nil {
 		return err
 	}
 	for _, line := range strings.Split(raw, "\n") {
-		f := strings.SplitN(line, "\t", 7)
-		if len(f) != 7 {
+		f := strings.SplitN(line, "\t", 8)
+		if len(f) != 8 {
 			continue
 		}
 		if f[0] == w.sidebar {
@@ -162,6 +174,7 @@ func (w *workspace) refresh() error {
 		if t == nil {
 			continue
 		}
+		t.claudeTTY = ""
 		if f[1] == "1" {
 			w.status(t, "exited", "")
 			if t.agent != nil {
@@ -173,17 +186,21 @@ func (w *workspace) refresh() error {
 			t.agent.nextProbe = time.Now().Add(5 * time.Second)
 			go w.discoverThread(t.agent)
 		}
-		if f[6] != "" {
-			t.term.CWD = f[6]
-			t.term.Checkout = w.resolve(f[6])
+		if f[7] != "" {
+			t.term.CWD = f[7]
+			t.term.Checkout = w.resolve(f[7])
 		}
-		t.term.Title = clean(f[5])
+		t.term.Title = clean(f[6])
+		command := f[4]
+		if t.agent == nil && (t.claudePane || claudeCommand.MatchString(command)) {
+			t.claudeTTY = f[5]
+		}
 		if t.agent == nil && !t.claudePane {
-			command := f[4]
 			switch {
 			case isShell(command):
 				// A killed process cannot send its final clear record.
 				t.term.Program = command
+				t.claudeReported = false
 				w.status(t, "shell", "")
 			case command == "claude" || command == "codex":
 				t.term.Program = command
